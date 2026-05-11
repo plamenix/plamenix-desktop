@@ -4,10 +4,12 @@ import {
   ProfilePicker,
   QueryPanel,
   ResultTable,
+  SchemaBrowser,
   type ConnectionForm,
   type CryptState,
   type Profile,
   type QueryResult,
+  type Schema,
 } from '@plamenix/ui';
 import { tauriTransport } from '@/transport/tauri';
 
@@ -37,6 +39,7 @@ export function App() {
   const [sql, setSql] = useState<string>(initialSql);
   const [result, setResult] = useState<QueryResult | null>(null);
   const [cryptState, setCryptState] = useState<CryptState | null>(null);
+  const [schema, setSchema] = useState<Schema | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
 
@@ -155,10 +158,21 @@ export function App() {
       setSessionId(response.sessionId);
       setResult(null);
       void refreshCryptState(response.sessionId);
+      void refreshSchema(response.sessionId);
     } catch (err) {
       setError(String(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const refreshSchema = async (id: string | null = sessionId) => {
+    if (!id) return;
+    try {
+      const next = await tauriTransport.invoke<Schema>('db_describe_schema', { sessionId: id });
+      setSchema(next);
+    } catch (err) {
+      setError(String(err));
     }
   };
 
@@ -196,6 +210,7 @@ export function App() {
       setSessionId(null);
       setResult(null);
       setCryptState(null);
+      setSchema(null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -203,14 +218,14 @@ export function App() {
     }
   };
 
-  return (
-    <main className="mx-auto flex h-full max-w-4xl flex-col gap-6 p-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Plamenix</h1>
-        <p className="text-sm text-zinc-400">Firebird IDE — 1.0.0-beta scaffold</p>
-      </header>
+  if (!sessionId) {
+    return (
+      <main className="mx-auto flex h-full max-w-4xl flex-col gap-6 p-6">
+        <header>
+          <h1 className="text-2xl font-semibold">Plamenix</h1>
+          <p className="text-sm text-zinc-400">Firebird IDE — 1.0.0-beta scaffold</p>
+        </header>
 
-      {!sessionId && (
         <ProfilePicker
           profiles={profiles}
           selectedId={selectedProfileId}
@@ -221,16 +236,39 @@ export function App() {
           onSave={handleSaveProfile}
           onDelete={handleDeleteProfile}
         />
-      )}
 
-      {!sessionId ? (
         <ConnectionPanel
           form={form}
           busy={busy}
           onChange={updateField}
           onSubmit={handleConnect}
         />
-      ) : (
+
+        {error && (
+          <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
+            {error}
+          </pre>
+        )}
+      </main>
+    );
+  }
+
+  return (
+    <div className="flex h-full">
+      <div className="w-64 shrink-0">
+        <SchemaBrowser
+          schema={schema}
+          busy={busy}
+          onRefresh={() => void refreshSchema()}
+          onSelect={(id) => setSql((prev) => (prev.length > 0 && !prev.endsWith(' ') ? `${prev} ${id}` : `${prev}${id}`))}
+        />
+      </div>
+      <main className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
+        <header>
+          <h1 className="text-2xl font-semibold">Plamenix</h1>
+          <p className="text-sm text-zinc-400">Firebird IDE — 1.0.0-beta scaffold</p>
+        </header>
+
         <QueryPanel
           sessionId={sessionId}
           sql={sql}
@@ -240,15 +278,15 @@ export function App() {
           onExecute={handleExecute}
           onClose={handleClose}
         />
-      )}
 
-      {error && (
-        <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
-          {error}
-        </pre>
-      )}
+        {error && (
+          <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
+            {error}
+          </pre>
+        )}
 
-      {result && <ResultTable result={result} />}
-    </main>
+        {result && <ResultTable result={result} />}
+      </main>
+    </div>
   );
 }

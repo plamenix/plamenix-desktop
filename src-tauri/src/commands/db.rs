@@ -4,7 +4,7 @@
 //! call into the shared `DbDriver`, and return a serialisable result.
 //! No business logic lives here.
 
-use plamenix_db::{ConnectMode, ConnectionConfig, CryptState, DbDriver, QueryResult, SessionId};
+use plamenix_db::{ConnectMode, ConnectionConfig, CryptState, DbDriver, QueryResult, Schema, SessionId};
 use serde::{Deserialize, Serialize};
 use tauri::State;
 
@@ -80,4 +80,16 @@ pub async fn db_crypt_state(
     session_id: SessionId,
 ) -> Result<CryptState, String> {
     state.driver().crypt_state(session_id).await.map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+pub async fn db_describe_schema(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<Schema, String> {
+    state
+        .driver()
+        .describe_schema(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }

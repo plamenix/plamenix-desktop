@@ -21,6 +21,7 @@ pub fn run() {
             commands::db::db_ping,
             commands::db::db_close,
             commands::db::db_crypt_state,
+            commands::db::db_describe_schema,
             commands::profiles::profile_list,
             commands::profiles::profile_save,
             commands::profiles::profile_delete,
