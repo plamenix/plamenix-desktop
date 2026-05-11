@@ -1,12 +1,11 @@
 @import 'tailwindcss';
+@import '@plamenix/ui/theme.css';
+
 /* Sibling polyrepo: scan @plamenix/ui's compiled JS directly. Tailwind's
    symlink resolution into node_modules is unreliable; this relative path
    is stable across dev and CI checkouts. */
 @source "../../../plamenix-ui/dist/**/*.{js,mjs}";
-
-:root {
-  color-scheme: dark;
-}
+@source "../../../plamenix-ui/src/**/*.{ts,tsx}";
 
 html,
 body,
@@ -17,7 +16,7 @@ body,
 
 @layer components {
   .input {
-    @apply rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100
-           focus:border-amber-600 focus:outline-none;
+    @apply rounded border border-edge bg-elevated px-3 py-2 text-sm text-fg
+           focus:border-accent focus:outline-none;
   }
 }

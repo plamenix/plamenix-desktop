@@ -5,8 +5,10 @@ import {
   QueryPanel,
   ResultTable,
   SchemaBrowser,
+  SettingsButton,
   TabStrip,
   useTabsStore,
+  useThemeStore,
   type ConnectionForm,
   type CryptState,
   type Profile,
@@ -336,13 +338,20 @@ export function App() {
 
   return (
     <div className="flex h-full flex-col">
-      <TabStrip
-        tabs={tabs}
-        activeTabId={activeTabId}
-        onSelect={setActive}
-        onClose={handleTabClose}
-        onNew={() => newTab()}
-      />
+      <div className="flex items-stretch">
+        <div className="flex-1 overflow-hidden">
+          <TabStrip
+            tabs={tabs}
+            activeTabId={activeTabId}
+            onSelect={setActive}
+            onClose={handleTabClose}
+            onNew={() => newTab()}
+          />
+        </div>
+        <div className="flex shrink-0 items-end gap-1 border-b border-edge bg-canvas px-2 pb-1">
+          <SettingsButton />
+        </div>
+      </div>
       {activeTab.sessionId === null ? (
         <ConnectView
           tab={activeTab}
@@ -456,11 +465,32 @@ function SessionView({
   onRefreshSchema,
   onTableAction,
 }: SessionViewProps) {
+  const sidebarCollapsed = useThemeStore((s) => s.sidebarCollapsed);
+  const toggleSidebar = useThemeStore((s) => s.toggleSidebar);
   if (!tab.sessionId) return null;
   return (
     <div className="flex flex-1 overflow-hidden">
-      <div className="w-64 shrink-0">
-        <SchemaBrowser
+      {sidebarCollapsed ? (
+        <button
+          type="button"
+          onClick={toggleSidebar}
+          aria-label="Expand schema sidebar"
+          className="flex shrink-0 items-start border-r border-edge bg-canvas px-2 pt-3 text-fg-subtle hover:text-fg"
+        >
+          »
+        </button>
+      ) : (
+        <div className="flex w-64 shrink-0 flex-col">
+          <button
+            type="button"
+            onClick={toggleSidebar}
+            aria-label="Collapse schema sidebar"
+            className="self-end px-2 text-fg-subtle hover:text-fg"
+            title="Collapse sidebar"
+          >
+            «
+          </button>
+          <SchemaBrowser
           schema={tab.schema}
           busy={tab.busy}
           onRefresh={onRefreshSchema}
@@ -471,7 +501,8 @@ function SessionView({
           }
           onAction={onTableAction}
         />
-      </div>
+        </div>
+      )}
       <main className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
         <QueryPanel
           sessionId={tab.sessionId}
@@ -484,7 +515,7 @@ function SessionView({
         />
 
         {tab.error && (
-          <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
+          <pre className="rounded bg-danger-subtle p-3 text-xs text-danger whitespace-pre-wrap">
             {tab.error}
           </pre>
         )}
