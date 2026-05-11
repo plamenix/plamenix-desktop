@@ -5,11 +5,14 @@ import {
   QueryPanel,
   ResultTable,
   SchemaBrowser,
+  TabStrip,
+  useTabsStore,
   type ConnectionForm,
   type CryptState,
   type Profile,
   type QueryResult,
   type Schema,
+  type TabState,
 } from '@plamenix/ui';
 import { tauriTransport } from '@/transport/tauri';
 
@@ -17,275 +20,354 @@ interface ConnectResponse {
   sessionId: string;
 }
 
-const initialForm: ConnectionForm = {
-  host: '127.0.0.1',
-  port: 3050,
-  database: '/var/lib/firebird/data/test.fdb',
-  user: 'SYSDBA',
-  password: 'masterkey',
-  pureRust: true,
-  encryptionKey: '',
-  encryptionRequired: false,
-};
-
-const initialSql = "SELECT 42 AS answer, 'plamenix' AS name FROM RDB$DATABASE";
+function deriveTitle(form: ConnectionForm): string {
+  const last = form.database.split(/[\\/]/).pop() ?? form.database;
+  return `${form.host}/${last}`;
+}
 
 export function App() {
-  const [form, setForm] = useState<ConnectionForm>(initialForm);
-  const [profiles, setProfiles] = useState<Profile[]>([]);
-  const [selectedProfileId, setSelectedProfileId] = useState<string | null>(null);
-  const [profileName, setProfileName] = useState<string>('');
-  const [sessionId, setSessionId] = useState<string | null>(null);
-  const [sql, setSql] = useState<string>(initialSql);
-  const [result, setResult] = useState<QueryResult | null>(null);
-  const [cryptState, setCryptState] = useState<CryptState | null>(null);
-  const [schema, setSchema] = useState<Schema | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [busy, setBusy] = useState<boolean>(false);
+  const tabs = useTabsStore((s) => s.tabs);
+  const activeTabId = useTabsStore((s) => s.activeTabId);
+  const newTab = useTabsStore((s) => s.newTab);
+  const closeTab = useTabsStore((s) => s.closeTab);
+  const setActive = useTabsStore((s) => s.setActive);
+  const patchTab = useTabsStore((s) => s.patchTab);
+  const renameTab = useTabsStore((s) => s.renameTab);
 
-  const updateField = <K extends keyof ConnectionForm>(key: K, value: ConnectionForm[K]) => {
-    setForm((prev) => ({ ...prev, [key]: value }));
-  };
+  const activeTab = tabs.find((t) => t.id === activeTabId) ?? tabs[0]!;
+
+  const [profiles, setProfiles] = useState<Profile[]>([]);
 
   const refreshProfiles = useCallback(async () => {
     try {
       const list = await tauriTransport.invoke<Profile[]>('profile_list');
       setProfiles(list);
     } catch (err) {
-      setError(String(err));
+      patchTab(activeTabId, { error: String(err) });
     }
-  }, []);
+  }, [activeTabId, patchTab]);
 
   useEffect(() => {
     void refreshProfiles();
   }, [refreshProfiles]);
 
+  const updateField = <K extends keyof ConnectionForm>(key: K, value: ConnectionForm[K]) => {
+    patchTab(activeTabId, { form: { ...activeTab.form, [key]: value } });
+  };
+
   const handleSelectProfile = (id: string | null) => {
-    setSelectedProfileId(id);
     if (id === null) {
-      setProfileName('');
+      patchTab(activeTabId, { selectedProfileId: null, profileName: '' });
       return;
     }
     const profile = profiles.find((p) => p.id === id);
     if (!profile) return;
-    setProfileName(profile.name);
-    setForm({
-      host: profile.host,
-      port: profile.port,
-      database: profile.database,
-      user: profile.user,
-      password: '',
-      pureRust: profile.pureRust,
-      encryptionKey: '',
-      encryptionRequired: profile.encryptionRequired,
+    patchTab(activeTabId, {
+      selectedProfileId: id,
+      profileName: profile.name,
+      form: {
+        host: profile.host,
+        port: profile.port,
+        database: profile.database,
+        user: profile.user,
+        password: '',
+        pureRust: profile.pureRust,
+        encryptionKey: '',
+        encryptionRequired: profile.encryptionRequired,
+      },
     });
   };
 
   const handleSaveProfile = async () => {
-    setError(null);
-    setBusy(true);
+    const tabId = activeTabId;
+    const tab = activeTab;
+    patchTab(tabId, { error: null, busy: true });
     try {
       const draft = {
-        id: selectedProfileId,
-        name: profileName.trim(),
-        host: form.host,
-        port: form.port,
-        database: form.database,
-        user: form.user,
-        encryptionRequired: form.encryptionRequired,
-        pureRust: form.pureRust,
-        password: form.password === '' ? null : form.password,
-        encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+        id: tab.selectedProfileId,
+        name: tab.profileName.trim(),
+        host: tab.form.host,
+        port: tab.form.port,
+        database: tab.form.database,
+        user: tab.form.user,
+        encryptionRequired: tab.form.encryptionRequired,
+        pureRust: tab.form.pureRust,
+        password: tab.form.password === '' ? null : tab.form.password,
+        encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
       };
       const saved = await tauriTransport.invoke<Profile>('profile_save', { draft });
       await refreshProfiles();
-      setSelectedProfileId(saved.id);
-      setProfileName(saved.name);
+      patchTab(tabId, { selectedProfileId: saved.id, profileName: saved.name });
     } catch (err) {
-      setError(String(err));
+      patchTab(tabId, { error: String(err) });
     } finally {
-      setBusy(false);
+      patchTab(tabId, { busy: false });
     }
   };
 
   const handleDeleteProfile = async () => {
-    if (selectedProfileId === null) return;
-    setError(null);
-    setBusy(true);
+    const tabId = activeTabId;
+    const id = activeTab.selectedProfileId;
+    if (id === null) return;
+    patchTab(tabId, { error: null, busy: true });
     try {
-      await tauriTransport.invoke<null>('profile_delete', { id: selectedProfileId });
+      await tauriTransport.invoke<null>('profile_delete', { id });
       await refreshProfiles();
-      setSelectedProfileId(null);
-      setProfileName('');
+      patchTab(tabId, { selectedProfileId: null, profileName: '' });
     } catch (err) {
-      setError(String(err));
+      patchTab(tabId, { error: String(err) });
     } finally {
-      setBusy(false);
+      patchTab(tabId, { busy: false });
     }
   };
 
   const handleConnect = async () => {
-    setError(null);
-    setBusy(true);
-    setCryptState(null);
+    const tabId = activeTabId;
+    const tab = activeTab;
+    patchTab(tabId, { error: null, busy: true, cryptState: null });
     try {
       let response: ConnectResponse;
-      if (selectedProfileId !== null) {
+      if (tab.selectedProfileId !== null) {
         response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
           request: {
-            profileId: selectedProfileId,
-            password: form.password === '' ? null : form.password,
-            encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
-            pureRust: form.pureRust,
-            encryptionRequired: form.encryptionRequired,
+            profileId: tab.selectedProfileId,
+            password: tab.form.password === '' ? null : tab.form.password,
+            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
+            pureRust: tab.form.pureRust,
+            encryptionRequired: tab.form.encryptionRequired,
             fbclientPath: null,
           },
         });
       } else {
         response = await tauriTransport.invoke<ConnectResponse>('db_connect', {
           request: {
-            host: form.host,
-            port: form.port,
-            database: form.database,
-            user: form.user,
-            password: form.password,
-            encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
-            encryptionRequired: form.encryptionRequired,
-            pureRust: form.pureRust,
+            host: tab.form.host,
+            port: tab.form.port,
+            database: tab.form.database,
+            user: tab.form.user,
+            password: tab.form.password,
+            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
+            encryptionRequired: tab.form.encryptionRequired,
+            pureRust: tab.form.pureRust,
           },
         });
       }
-      setSessionId(response.sessionId);
-      setResult(null);
-      void refreshCryptState(response.sessionId);
-      void refreshSchema(response.sessionId);
+      patchTab(tabId, { sessionId: response.sessionId, result: null });
+      renameTab(tabId, tab.profileName.trim() || deriveTitle(tab.form));
+      void refreshCryptState(tabId, response.sessionId);
+      void refreshSchema(tabId, response.sessionId);
     } catch (err) {
-      setError(String(err));
+      patchTab(tabId, { error: String(err) });
     } finally {
-      setBusy(false);
+      patchTab(tabId, { busy: false });
     }
   };
 
-  const refreshSchema = async (id: string | null = sessionId) => {
-    if (!id) return;
+  const refreshCryptState = async (tabId: string, sessionId: string) => {
     try {
-      const next = await tauriTransport.invoke<Schema>('db_describe_schema', { sessionId: id });
-      setSchema(next);
-    } catch (err) {
-      setError(String(err));
-    }
-  };
-
-  const refreshCryptState = async (id: string) => {
-    try {
-      const state = await tauriTransport.invoke<CryptState>('db_crypt_state', { sessionId: id });
-      setCryptState(state);
+      const state = await tauriTransport.invoke<CryptState>('db_crypt_state', { sessionId });
+      patchTab(tabId, { cryptState: state });
     } catch {
-      setCryptState(null);
+      patchTab(tabId, { cryptState: null });
+    }
+  };
+
+  const refreshSchema = async (tabId: string, sessionId: string) => {
+    try {
+      const schema = await tauriTransport.invoke<Schema>('db_describe_schema', { sessionId });
+      patchTab(tabId, { schema });
+    } catch (err) {
+      patchTab(tabId, { error: String(err) });
     }
   };
 
   const handleExecute = async () => {
-    if (!sessionId) return;
-    setError(null);
-    setBusy(true);
+    const tabId = activeTabId;
+    const tab = activeTab;
+    if (!tab.sessionId) return;
+    patchTab(tabId, { error: null, busy: true });
     try {
       const res = await tauriTransport.invoke<QueryResult>('db_execute', {
-        request: { sessionId, sql },
+        request: { sessionId: tab.sessionId, sql: tab.sql },
       });
-      setResult(res);
+      patchTab(tabId, { result: res });
     } catch (err) {
-      setError(String(err));
+      patchTab(tabId, { error: String(err) });
     } finally {
-      setBusy(false);
+      patchTab(tabId, { busy: false });
     }
   };
 
-  const handleClose = async () => {
-    if (!sessionId) return;
-    setError(null);
-    setBusy(true);
+  const handleDisconnect = async () => {
+    const tabId = activeTabId;
+    const tab = activeTab;
+    if (!tab.sessionId) return;
+    patchTab(tabId, { error: null, busy: true });
     try {
-      await tauriTransport.invoke<null>('db_close', { sessionId });
-      setSessionId(null);
-      setResult(null);
-      setCryptState(null);
-      setSchema(null);
+      await tauriTransport.invoke<null>('db_close', { sessionId: tab.sessionId });
+      patchTab(tabId, {
+        sessionId: null,
+        result: null,
+        cryptState: null,
+        schema: null,
+      });
     } catch (err) {
-      setError(String(err));
+      patchTab(tabId, { error: String(err) });
     } finally {
-      setBusy(false);
+      patchTab(tabId, { busy: false });
     }
   };
 
-  if (!sessionId) {
-    return (
-      <main className="mx-auto flex h-full max-w-4xl flex-col gap-6 p-6">
-        <header>
-          <h1 className="text-2xl font-semibold">Plamenix</h1>
-          <p className="text-sm text-zinc-400">Firebird IDE — 1.0.0-beta scaffold</p>
-        </header>
-
-        <ProfilePicker
-          profiles={profiles}
-          selectedId={selectedProfileId}
-          name={profileName}
-          busy={busy}
-          onSelect={handleSelectProfile}
-          onNameChange={setProfileName}
-          onSave={handleSaveProfile}
-          onDelete={handleDeleteProfile}
-        />
-
-        <ConnectionPanel
-          form={form}
-          busy={busy}
-          onChange={updateField}
-          onSubmit={handleConnect}
-        />
-
-        {error && (
-          <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
-            {error}
-          </pre>
-        )}
-      </main>
-    );
-  }
+  const handleTabClose = (id: string) => {
+    const tab = tabs.find((t) => t.id === id);
+    if (tab?.sessionId) {
+      void tauriTransport
+        .invoke<null>('db_close', { sessionId: tab.sessionId })
+        .catch(() => {});
+    }
+    closeTab(id);
+  };
 
   return (
-    <div className="flex h-full">
+    <div className="flex h-full flex-col">
+      <TabStrip
+        tabs={tabs}
+        activeTabId={activeTabId}
+        onSelect={setActive}
+        onClose={handleTabClose}
+        onNew={() => newTab()}
+      />
+      {activeTab.sessionId === null ? (
+        <ConnectView
+          tab={activeTab}
+          profiles={profiles}
+          onFieldChange={updateField}
+          onSelectProfile={handleSelectProfile}
+          onProfileNameChange={(v) => patchTab(activeTabId, { profileName: v })}
+          onSaveProfile={handleSaveProfile}
+          onDeleteProfile={handleDeleteProfile}
+          onConnect={handleConnect}
+        />
+      ) : (
+        <SessionView
+          tab={activeTab}
+          onSqlChange={(v) => patchTab(activeTabId, { sql: v })}
+          onExecute={handleExecute}
+          onDisconnect={handleDisconnect}
+          onRefreshSchema={() => {
+            if (activeTab.sessionId) {
+              void refreshSchema(activeTabId, activeTab.sessionId);
+            }
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+interface ConnectViewProps {
+  tab: TabState;
+  profiles: Profile[];
+  onFieldChange: <K extends keyof ConnectionForm>(key: K, value: ConnectionForm[K]) => void;
+  onSelectProfile: (id: string | null) => void;
+  onProfileNameChange: (value: string) => void;
+  onSaveProfile: () => void;
+  onDeleteProfile: () => void;
+  onConnect: () => void;
+}
+
+function ConnectView({
+  tab,
+  profiles,
+  onFieldChange,
+  onSelectProfile,
+  onProfileNameChange,
+  onSaveProfile,
+  onDeleteProfile,
+  onConnect,
+}: ConnectViewProps) {
+  return (
+    <main className="mx-auto flex flex-1 w-full max-w-4xl flex-col gap-6 overflow-y-auto p-6">
+      <header>
+        <h1 className="text-2xl font-semibold">Plamenix</h1>
+        <p className="text-sm text-zinc-400">Firebird IDE — 1.0.0-beta scaffold</p>
+      </header>
+
+      <ProfilePicker
+        profiles={profiles}
+        selectedId={tab.selectedProfileId}
+        name={tab.profileName}
+        busy={tab.busy}
+        onSelect={onSelectProfile}
+        onNameChange={onProfileNameChange}
+        onSave={onSaveProfile}
+        onDelete={onDeleteProfile}
+      />
+
+      <ConnectionPanel
+        form={tab.form}
+        busy={tab.busy}
+        onChange={onFieldChange}
+        onSubmit={onConnect}
+      />
+
+      {tab.error && (
+        <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
+          {tab.error}
+        </pre>
+      )}
+    </main>
+  );
+}
+
+interface SessionViewProps {
+  tab: TabState;
+  onSqlChange: (value: string) => void;
+  onExecute: () => void;
+  onDisconnect: () => void;
+  onRefreshSchema: () => void;
+}
+
+function SessionView({
+  tab,
+  onSqlChange,
+  onExecute,
+  onDisconnect,
+  onRefreshSchema,
+}: SessionViewProps) {
+  if (!tab.sessionId) return null;
+  return (
+    <div className="flex flex-1 overflow-hidden">
       <div className="w-64 shrink-0">
         <SchemaBrowser
-          schema={schema}
-          busy={busy}
-          onRefresh={() => void refreshSchema()}
-          onSelect={(id) => setSql((prev) => (prev.length > 0 && !prev.endsWith(' ') ? `${prev} ${id}` : `${prev}${id}`))}
+          schema={tab.schema}
+          busy={tab.busy}
+          onRefresh={onRefreshSchema}
+          onSelect={(id) =>
+            onSqlChange(
+              tab.sql.length > 0 && !tab.sql.endsWith(' ') ? `${tab.sql} ${id}` : `${tab.sql}${id}`,
+            )
+          }
         />
       </div>
       <main className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
-        <header>
-          <h1 className="text-2xl font-semibold">Plamenix</h1>
-          <p className="text-sm text-zinc-400">Firebird IDE — 1.0.0-beta scaffold</p>
-        </header>
-
         <QueryPanel
-          sessionId={sessionId}
-          sql={sql}
-          busy={busy}
-          cryptState={cryptState}
-          onSqlChange={setSql}
-          onExecute={handleExecute}
-          onClose={handleClose}
+          sessionId={tab.sessionId}
+          sql={tab.sql}
+          busy={tab.busy}
+          cryptState={tab.cryptState}
+          onSqlChange={onSqlChange}
+          onExecute={onExecute}
+          onClose={onDisconnect}
         />
 
-        {error && (
+        {tab.error && (
           <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
-            {error}
+            {tab.error}
           </pre>
         )}
 
-        {result && <ResultTable result={result} />}
+        {tab.result && <ResultTable result={tab.result} />}
       </main>
     </div>
   );
