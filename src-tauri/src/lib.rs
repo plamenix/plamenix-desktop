@@ -17,6 +17,7 @@ pub fn run() {
             commands::db::db_execute,
             commands::db::db_ping,
             commands::db::db_close,
+            commands::db::db_crypt_state,
         ])
         .setup(|app| {
             let handle = app.handle().clone();
