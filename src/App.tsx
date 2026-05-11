@@ -4,6 +4,7 @@ import {
   QueryPanel,
   ResultTable,
   type ConnectionForm,
+  type CryptState,
   type QueryResult,
 } from '@plamenix/ui';
 import { tauriTransport } from '@/transport/tauri';
@@ -19,6 +20,8 @@ const initialForm: ConnectionForm = {
   user: 'SYSDBA',
   password: 'masterkey',
   pureRust: true,
+  encryptionKey: '',
+  encryptionRequired: false,
 };
 
 const initialSql = "SELECT 42 AS answer, 'plamenix' AS name FROM RDB$DATABASE";
@@ -28,6 +31,7 @@ export function App() {
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [sql, setSql] = useState<string>(initialSql);
   const [result, setResult] = useState<QueryResult | null>(null);
+  const [cryptState, setCryptState] = useState<CryptState | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState<boolean>(false);
 
@@ -38,6 +42,7 @@ export function App() {
   const handleConnect = async () => {
     setError(null);
     setBusy(true);
+    setCryptState(null);
     try {
       const response = await tauriTransport.invoke<ConnectResponse>('db_connect', {
         request: {
@@ -46,16 +51,29 @@ export function App() {
           database: form.database,
           user: form.user,
           password: form.password,
-          encryptionRequired: false,
+          encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+          encryptionRequired: form.encryptionRequired,
           pureRust: form.pureRust,
         },
       });
       setSessionId(response.sessionId);
       setResult(null);
+      void refreshCryptState(response.sessionId);
     } catch (err) {
       setError(String(err));
     } finally {
       setBusy(false);
+    }
+  };
+
+  const refreshCryptState = async (id: string) => {
+    try {
+      const state = await tauriTransport.invoke<CryptState>('db_crypt_state', { sessionId: id });
+      setCryptState(state);
+    } catch {
+      // Surface as null so the badge falls back to "checking…"; the
+      // connection itself stays usable even when MON$ access is denied.
+      setCryptState(null);
     }
   };
 
@@ -83,6 +101,7 @@ export function App() {
       await tauriTransport.invoke<null>('db_close', { sessionId });
       setSessionId(null);
       setResult(null);
+      setCryptState(null);
     } catch (err) {
       setError(String(err));
     } finally {
@@ -109,6 +128,7 @@ export function App() {
           sessionId={sessionId}
           sql={sql}
           busy={busy}
+          cryptState={cryptState}
           onSqlChange={setSql}
           onExecute={handleExecute}
           onClose={handleClose}
