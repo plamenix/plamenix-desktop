@@ -21,7 +21,7 @@
     "test": "vitest run"
   },
   "dependencies": {
-    "@plamenix/ui": "file:../plamenix-ui",
+    "@plamenix/ui": "link:../plamenix-ui",
     "@tanstack/react-query": "^5.100.0",
     "@tauri-apps/api": "^2.11.0",
     "react": "^19.0.0",

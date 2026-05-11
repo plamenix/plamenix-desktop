@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@plamenix/ui':
-        specifier: file:../plamenix-ui
-        version: file:../plamenix-ui(react-dom@19.2.6(react@19.2.6))(react@19.2.6)
+        specifier: link:../plamenix-ui
+        version: link:../plamenix-ui
       '@tanstack/react-query':
         specifier: ^5.100.0
         version: 5.100.9(react@19.2.6)
@@ -170,13 +170,6 @@ packages:
 
   '@oxc-project/types@0.128.0':
     resolution: {integrity: sha512-huv1Y/LzBJkBVHt3OlC7u0zHBW9qXf1FdD7sGmc1rXc2P1mTwHssYv7jyGx5KAACSCH+9B3Bhn6Z9luHRvf7pQ==}
-
-  '@plamenix/ui@file:../plamenix-ui':
-    resolution: {directory: ../plamenix-ui, type: directory}
-    engines: {node: '>=20'}
-    peerDependencies:
-      react: ^19
-      react-dom: ^19
 
   '@rolldown/binding-android-arm64@1.0.0-rc.18':
     resolution: {integrity: sha512-lIDyUAfD7U3+BWKzdxMbJcsYHuqXqmGz40aeRqvuAm3y5TkJSYTBW2RDrn65DJFPQqVjUAUqq5uz8urzQ8aBdQ==}
@@ -1358,11 +1351,6 @@ snapshots:
     optional: true
 
   '@oxc-project/types@0.128.0': {}
-
-  '@plamenix/ui@file:../plamenix-ui(react-dom@19.2.6(react@19.2.6))(react@19.2.6)':
-    dependencies:
-      react: 19.2.6
-      react-dom: 19.2.6(react@19.2.6)
 
   '@rolldown/binding-android-arm64@1.0.0-rc.18':
     optional: true

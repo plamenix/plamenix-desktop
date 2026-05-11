@@ -1,4 +1,8 @@
 @import 'tailwindcss';
+/* Sibling polyrepo: scan @plamenix/ui's compiled JS directly. Tailwind's
+   symlink resolution into node_modules is unreliable; this relative path
+   is stable across dev and CI checkouts. */
+@source "../../../plamenix-ui/dist/**/*.{js,mjs}";
 
 :root {
   color-scheme: dark;
