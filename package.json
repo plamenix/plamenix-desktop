@@ -1,0 +1,46 @@
+{
+  "name": "@plamenix/desktop",
+  "version": "1.0.0-beta.0",
+  "description": "Plamenix — Firebird IDE, desktop edition (Tauri 2 shell).",
+  "private": true,
+  "type": "module",
+  "license": "(MIT OR Apache-2.0)",
+  "author": "Zlatan Omerović <zlomerovic@hotmail.com>",
+  "packageManager": "pnpm@10.0.0",
+  "engines": {
+    "node": ">=24"
+  },
+  "scripts": {
+    "dev": "vite",
+    "build": "tsc -b && vite build",
+    "preview": "vite preview",
+    "tauri": "tauri",
+    "typecheck": "tsc --noEmit",
+    "lint": "eslint .",
+    "format": "prettier --write .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@plamenix/ui": "file:../plamenix-ui",
+    "@tanstack/react-query": "^6.0.0",
+    "@tauri-apps/api": "^2.11.0",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "zustand": "^6.0.0"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.11.0",
+    "@types/node": "^24.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^5.0.0",
+    "autoprefixer": "^10.4.0",
+    "eslint": "^9.0.0",
+    "postcss": "^8.4.0",
+    "prettier": "^3.4.0",
+    "tailwindcss": "^4.0.0",
+    "typescript": "^6.0.3",
+    "vite": "^8.0.0",
+    "vitest": "^4.0.0"
+  }
+}
