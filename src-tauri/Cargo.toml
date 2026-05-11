@@ -25,6 +25,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 plamenix-types = { path = "../../plamenix-core/crates/plamenix-types" }
 plamenix-db = { path = "../../plamenix-core/crates/plamenix-db", default-features = false, features = ["pure-rust", "native"] }
+plamenix-profiles = { path = "../../plamenix-core/crates/plamenix-profiles" }
+plamenix-secrets = { path = "../../plamenix-core/crates/plamenix-secrets" }
 
 [lints.rust]
 unsafe_code = "forbid"
