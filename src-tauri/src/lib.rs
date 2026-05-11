@@ -38,13 +38,13 @@ pub fn run() {
             let handle = app.handle().clone();
             tauri::async_runtime::spawn(async move {
                 emit_step(&handle, &BootStep::new("Initialising core"));
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                tokio::time::sleep(Duration::from_millis(1500)).await;
 
                 emit_step(&handle, &BootStep::new("Scanning plugins"));
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                tokio::time::sleep(Duration::from_millis(1500)).await;
 
                 emit_step(&handle, &BootStep::new("Loading workspace"));
-                tokio::time::sleep(Duration::from_millis(150)).await;
+                tokio::time::sleep(Duration::from_millis(1500)).await;
 
                 finish(&handle);
             });

@@ -33,10 +33,11 @@ test:
     cd src-tauri && cargo test --all-features
     pnpm vitest run
 
-# Regenerate Tauri icon set + favicons from the branding sibling repo.
-# Run after a plamenix-branding update.
+# Regenerate Tauri icon set + favicons + splash from the branding
+# sibling repo. Run after a plamenix-branding update.
 refresh-icons:
     pnpm tauri icon ../plamenix-branding/build/icon/icon-1024.png
-    rm -rf public/favicon
-    mkdir -p public/favicon
+    rm -rf public/favicon public/branding
+    mkdir -p public/favicon public/branding
     cp ../plamenix-branding/build/favicon/* public/favicon/
+    cp ../plamenix-branding/build/splash/splash.svg public/branding/splash.svg

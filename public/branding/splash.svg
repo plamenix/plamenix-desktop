@@ -1,0 +1,52 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 500 320" preserveAspectRatio="xMidYMid slice" role="img" aria-label="Plamenix splash">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0a0b10"/>
+      <stop offset="55%" stop-color="#1d1414"/>
+      <stop offset="100%" stop-color="#3a1f0c"/>
+    </linearGradient>
+    <radialGradient id="topGlow" cx="88%" cy="-12%" r="78%">
+      <stop offset="0%" stop-color="#F97316" stop-opacity="0.45"/>
+      <stop offset="65%" stop-color="#F97316" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="bottomGlow" cx="50%" cy="105%" r="68%">
+      <stop offset="0%" stop-color="#F97316" stop-opacity="0.18"/>
+      <stop offset="60%" stop-color="#F97316" stop-opacity="0"/>
+    </radialGradient>
+    <radialGradient id="flameOuter" cx="50%" cy="78%" r="58%" fx="50%" fy="78%">
+      <stop offset="0%" stop-color="#FFFBEB"/>
+      <stop offset="14%" stop-color="#FEF08A"/>
+      <stop offset="32%" stop-color="#FBBF24"/>
+      <stop offset="55%" stop-color="#F97316"/>
+      <stop offset="80%" stop-color="#DC2626"/>
+      <stop offset="100%" stop-color="#7F1D1D"/>
+    </radialGradient>
+    <radialGradient id="flameInner" cx="50%" cy="80%" r="48%" fx="50%" fy="80%">
+      <stop offset="0%" stop-color="#FFFFFF"/>
+      <stop offset="22%" stop-color="#FDE047"/>
+      <stop offset="55%" stop-color="#FB923C"/>
+      <stop offset="100%" stop-color="#DC2626"/>
+    </radialGradient>
+    <clipPath id="rounded">
+      <rect width="500" height="320" rx="14" ry="14"/>
+    </clipPath>
+  </defs>
+
+  <g clip-path="url(#rounded)">
+    <rect width="500" height="320" fill="url(#bg)"/>
+    <rect width="500" height="320" fill="url(#topGlow)"/>
+    <rect width="500" height="320" fill="url(#bottomGlow)"/>
+
+    <g transform="translate(46 56) scale(0.82)">
+      <path fill="url(#flameOuter)" d="M117 87.03c0 27.45-22.725 49.5225-50.175 47.8845-28.21-1.683-47.52-28.8135-43.884-57.1725 2.2005-17.2485 10.287-32.04 19.089-43.515 1.53-2.0025 3.1005 14.112 4.671 12.339 1.575-1.8225 16.173-27.0855 21.249-35.9595a3.123 3.123 0 0 1 4.626-.9585C82.773 17.343 117 46.2465 117 87.03Z"/>
+      <path fill="url(#flameInner)" d="M103.5 98.3295c0 18.189-15.8355 32.8095-35.0955 32.148-20.79-.702-35.046-19.728-31.995-39.3255C40.815 63.054 69.66 45 69.66 45S103.5 66.1815 103.5 98.3295Z"/>
+    </g>
+
+    <text x="200" y="128" font-family="Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="52" font-weight="700" letter-spacing="-1.5" fill="#FFFFFF">plamenix<tspan fill="#F97316">.</tspan></text>
+    <text x="201" y="162" font-family="Inter, system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="14" font-weight="500" fill="#CDD4E3">Next-generation Firebird IDE</text>
+
+    <line x1="46" y1="232" x2="454" y2="232" stroke="#F97316" stroke-opacity="0.18" stroke-width="1"/>
+    <text x="46" y="256" font-family="'JetBrains Mono', ui-monospace, Menlo, Consolas, monospace" font-size="11" font-weight="500" fill="#9aa3b8" letter-spacing="0.4">v1.0.0-beta · Tauri · React · rsfbclient</text>
+  </g>
+</svg>

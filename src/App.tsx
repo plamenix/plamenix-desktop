@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import {
-  ConnectionPanel,
-  ProfilePicker,
+  ConnectionScreen,
   QueryPanel,
   ResultTable,
   SchemaBrowser,
@@ -142,20 +141,20 @@ export function App() {
     }
   };
 
-  const handleDeleteProfile = async () => {
+  const handleDeleteProfile = async (id: string) => {
     const tabId = activeTabId;
-    const id = activeTab.selectedProfileId;
-    if (id === null) return;
     const existing = profiles.find((p) => p.id === id);
-    const label = existing?.name ?? 'this profile';
-    if (!window.confirm(`Delete "${label}"? This also removes its keyring entries.`)) {
+    if (!existing) return;
+    if (!window.confirm(`Delete "${existing.name}"? This also removes its keyring entries.`)) {
       return;
     }
     patchTab(tabId, { error: null, busy: true });
     try {
       await tauriTransport.invoke<null>('profile_delete', { id });
       await refreshProfiles();
-      patchTab(tabId, { selectedProfileId: null, profileName: '' });
+      if (activeTab.selectedProfileId === id) {
+        patchTab(tabId, { selectedProfileId: null, profileName: '' });
+      }
     } catch (err) {
       patchTab(tabId, { error: String(err) });
     } finally {
@@ -163,35 +162,41 @@ export function App() {
     }
   };
 
-  const handleRenameProfile = async () => {
+  const handleQuickConnect = async (profileId: string) => {
     const tabId = activeTabId;
-    const tab = activeTab;
-    const id = tab.selectedProfileId;
-    if (id === null) return;
-    const existing = profiles.find((p) => p.id === id);
-    if (!existing) return;
-    const newName = tab.profileName.trim();
-    if (newName === '' || newName === existing.name) return;
-    patchTab(tabId, { error: null, busy: true });
+    const profile = profiles.find((p) => p.id === profileId);
+    if (!profile) return;
+    patchTab(tabId, {
+      error: null,
+      busy: true,
+      cryptState: null,
+      selectedProfileId: profileId,
+      profileName: profile.name,
+      form: {
+        ...activeTab.form,
+        host: profile.host,
+        port: profile.port,
+        database: profile.database,
+        user: profile.user,
+        encryptionRequired: profile.encryptionRequired,
+        pureRust: profile.pureRust,
+      },
+    });
     try {
-      // profile_save preserves untouched keyring refs and ignores the
-      // `password` / `encryptionKey` fields when null, so we can rename
-      // without overwriting any other field of the saved record.
-      const draft = {
-        id: existing.id,
-        name: newName,
-        host: existing.host,
-        port: existing.port,
-        database: existing.database,
-        user: existing.user,
-        encryptionRequired: existing.encryptionRequired,
-        pureRust: existing.pureRust,
-        password: null,
-        encryptionKey: null,
-      };
-      const saved = await tauriTransport.invoke<Profile>('profile_save', { draft });
-      await refreshProfiles();
-      patchTab(tabId, { selectedProfileId: saved.id, profileName: saved.name });
+      const response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
+        request: {
+          profileId,
+          password: activeTab.form.password === '' ? null : activeTab.form.password,
+          encryptionKey: activeTab.form.encryptionKey === '' ? null : activeTab.form.encryptionKey,
+          pureRust: profile.pureRust,
+          encryptionRequired: profile.encryptionRequired,
+          fbclientPath: null,
+        },
+      });
+      patchTab(tabId, { sessionId: response.sessionId, result: null });
+      renameTab(tabId, profile.name);
+      void refreshCryptState(tabId, response.sessionId);
+      void refreshSchema(tabId, response.sessionId);
     } catch (err) {
       patchTab(tabId, { error: String(err) });
     } finally {
@@ -361,7 +366,7 @@ export function App() {
           onProfileNameChange={(v) => patchTab(activeTabId, { profileName: v })}
           onSaveProfile={handleSaveProfile}
           onDeleteProfile={handleDeleteProfile}
-          onRenameProfile={handleRenameProfile}
+          onQuickConnect={handleQuickConnect}
           onConnect={handleConnect}
         />
       ) : (
@@ -389,8 +394,8 @@ interface ConnectViewProps {
   onSelectProfile: (id: string | null) => void;
   onProfileNameChange: (value: string) => void;
   onSaveProfile: () => void;
-  onDeleteProfile: () => void;
-  onRenameProfile: () => void;
+  onDeleteProfile: (id: string) => void;
+  onQuickConnect: (id: string) => void;
   onConnect: () => void;
 }
 
@@ -402,7 +407,7 @@ function ConnectView({
   onProfileNameChange,
   onSaveProfile,
   onDeleteProfile,
-  onRenameProfile,
+  onQuickConnect,
   onConnect,
 }: ConnectViewProps) {
   const selected = tab.selectedProfileId
@@ -413,38 +418,24 @@ function ConnectView({
       ? 'Leave empty to use the password stored in your keyring for this profile.'
       : undefined;
   return (
-    <main className="mx-auto flex flex-1 w-full max-w-4xl flex-col gap-6 overflow-y-auto p-6">
-      <header>
-        <h1 className="text-2xl font-semibold">Plamenix</h1>
-        <p className="text-sm text-zinc-400">Firebird IDE — 1.0.0-beta scaffold</p>
-      </header>
-
-      <ProfilePicker
-        profiles={profiles}
-        selectedId={tab.selectedProfileId}
-        name={tab.profileName}
-        busy={tab.busy}
-        onSelect={onSelectProfile}
-        onNameChange={onProfileNameChange}
-        onSave={onSaveProfile}
-        onDelete={onDeleteProfile}
-        onRename={onRenameProfile}
-      />
-
-      <ConnectionPanel
+    <div className="flex-1 overflow-hidden">
+      <ConnectionScreen
         form={tab.form}
+        profileName={tab.profileName}
         busy={tab.busy}
-        onChange={onFieldChange}
-        onSubmit={onConnect}
+        error={tab.error}
+        profiles={profiles}
+        selectedProfileId={tab.selectedProfileId}
         {...(passwordHint !== undefined && { passwordHint })}
+        onChange={onFieldChange}
+        onProfileNameChange={onProfileNameChange}
+        onSelectProfile={onSelectProfile}
+        onSaveProfile={onSaveProfile}
+        onDeleteProfile={onDeleteProfile}
+        onQuickConnect={onQuickConnect}
+        onSubmit={onConnect}
       />
-
-      {tab.error && (
-        <pre className="rounded bg-red-950/40 p-3 text-xs text-red-200 whitespace-pre-wrap">
-          {tab.error}
-        </pre>
-      )}
-    </main>
+    </div>
   );
 }
 

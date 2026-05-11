@@ -11,6 +11,12 @@ export default defineConfig({
     alias: {
       '@': fileURLToPath(new URL('./src', import.meta.url)),
     },
+    // pnpm + `link:` protocol leaves each repo with its own `react` /
+    // `react-dom` resolution. Vite would otherwise bundle two React
+    // instances (one per consuming graph), and React 19 panics with
+    // `S.H.useCallback is null` when the dispatcher is set on the
+    // other copy. Force one.
+    dedupe: ['react', 'react-dom', 'react/jsx-runtime'],
   },
   clearScreen: false,
   server: {

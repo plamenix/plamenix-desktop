@@ -30,18 +30,17 @@ function Splash() {
   }, []);
 
   return (
-    <div className="flex h-screen w-screen flex-col justify-between rounded-xl bg-panel/90 p-6 text-fg backdrop-blur">
-      <img
-        src="/favicon/favicon-192.png"
-        alt=""
-        aria-hidden="true"
-        className="h-16 w-16 self-start"
-      />
-      <div>
-        <div className="text-lg font-semibold">Plamenix</div>
-        <div className="text-xs text-fg-muted">Firebird IDE — 1.0.0-beta</div>
-        <div className="mt-6 text-xs text-fg">{step.label}</div>
-        {step.detail && <div className="text-[10px] text-fg-subtle">{step.detail}</div>}
+    <div
+      className="relative flex h-screen w-screen flex-col justify-end overflow-hidden rounded-xl text-white"
+      style={{
+        backgroundImage: 'url(/branding/splash.svg)',
+        backgroundSize: 'cover',
+        backgroundPosition: 'center',
+      }}
+    >
+      <div className="relative px-12 pb-6">
+        <div className="text-xs text-zinc-200">{step.label}</div>
+        {step.detail && <div className="text-[10px] text-zinc-400">{step.detail}</div>}
       </div>
     </div>
   );
