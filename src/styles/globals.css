@@ -10,3 +10,10 @@ body,
   height: 100%;
   margin: 0;
 }
+
+@layer components {
+  .input {
+    @apply rounded border border-zinc-700 bg-zinc-950 px-3 py-2 text-sm text-zinc-100
+           focus:border-amber-600 focus:outline-none;
+  }
+}

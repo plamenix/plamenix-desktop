@@ -5,6 +5,12 @@ dist/
 *.log
 .DS_Store
 
+# TypeScript build artifacts
+*.tsbuildinfo
+src/**/*.js
+src/**/*.js.map
+vite.config.js
+
 # Tauri
 src-tauri/target/
 src-tauri/gen/

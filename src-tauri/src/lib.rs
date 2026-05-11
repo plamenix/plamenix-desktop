@@ -10,7 +10,6 @@ use db::DbState;
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let result = tauri::Builder::default()
-        .plugin(tauri_plugin_log::Builder::new().build())
         .manage(DbState::new())
         .invoke_handler(tauri::generate_handler![
             commands::ping,

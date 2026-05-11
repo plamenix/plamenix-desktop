@@ -12,7 +12,7 @@
   },
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build",
+    "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
     "tauri": "tauri",
     "typecheck": "tsc --noEmit",
@@ -22,25 +22,27 @@
   },
   "dependencies": {
     "@plamenix/ui": "file:../plamenix-ui",
-    "@tanstack/react-query": "^6.0.0",
+    "@tanstack/react-query": "^5.100.0",
     "@tauri-apps/api": "^2.11.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
-    "zustand": "^6.0.0"
+    "zustand": "^5.0.0"
   },
   "devDependencies": {
+    "@tailwindcss/postcss": "^4.3.0",
     "@tauri-apps/cli": "^2.11.0",
     "@types/node": "^24.0.0",
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
-    "@vitejs/plugin-react": "^5.0.0",
-    "autoprefixer": "^10.4.0",
+    "@vitejs/plugin-react": "^6.0.0",
+    "autoprefixer": "^10.5.0",
     "eslint": "^9.0.0",
-    "postcss": "^8.4.0",
-    "prettier": "^3.4.0",
-    "tailwindcss": "^4.0.0",
+    "postcss": "^8.5.0",
+    "prettier": "^3.8.0",
+    "tailwindcss": "^4.3.0",
     "typescript": "^6.0.3",
+    "typescript-eslint": "^8.59.0",
     "vite": "^8.0.0",
-    "vitest": "^4.0.0"
+    "vitest": "^4.1.0"
   }
 }
