@@ -109,11 +109,52 @@ export function App() {
     const tabId = activeTabId;
     const id = activeTab.selectedProfileId;
     if (id === null) return;
+    const existing = profiles.find((p) => p.id === id);
+    const label = existing?.name ?? 'this profile';
+    if (!window.confirm(`Delete "${label}"? This also removes its keyring entries.`)) {
+      return;
+    }
     patchTab(tabId, { error: null, busy: true });
     try {
       await tauriTransport.invoke<null>('profile_delete', { id });
       await refreshProfiles();
       patchTab(tabId, { selectedProfileId: null, profileName: '' });
+    } catch (err) {
+      patchTab(tabId, { error: String(err) });
+    } finally {
+      patchTab(tabId, { busy: false });
+    }
+  };
+
+  const handleRenameProfile = async () => {
+    const tabId = activeTabId;
+    const tab = activeTab;
+    const id = tab.selectedProfileId;
+    if (id === null) return;
+    const existing = profiles.find((p) => p.id === id);
+    if (!existing) return;
+    const newName = tab.profileName.trim();
+    if (newName === '' || newName === existing.name) return;
+    patchTab(tabId, { error: null, busy: true });
+    try {
+      // profile_save preserves untouched keyring refs and ignores the
+      // `password` / `encryptionKey` fields when null, so we can rename
+      // without overwriting any other field of the saved record.
+      const draft = {
+        id: existing.id,
+        name: newName,
+        host: existing.host,
+        port: existing.port,
+        database: existing.database,
+        user: existing.user,
+        encryptionRequired: existing.encryptionRequired,
+        pureRust: existing.pureRust,
+        password: null,
+        encryptionKey: null,
+      };
+      const saved = await tauriTransport.invoke<Profile>('profile_save', { draft });
+      await refreshProfiles();
+      patchTab(tabId, { selectedProfileId: saved.id, profileName: saved.name });
     } catch (err) {
       patchTab(tabId, { error: String(err) });
     } finally {
@@ -246,6 +287,7 @@ export function App() {
           onProfileNameChange={(v) => patchTab(activeTabId, { profileName: v })}
           onSaveProfile={handleSaveProfile}
           onDeleteProfile={handleDeleteProfile}
+          onRenameProfile={handleRenameProfile}
           onConnect={handleConnect}
         />
       ) : (
@@ -273,6 +315,7 @@ interface ConnectViewProps {
   onProfileNameChange: (value: string) => void;
   onSaveProfile: () => void;
   onDeleteProfile: () => void;
+  onRenameProfile: () => void;
   onConnect: () => void;
 }
 
@@ -284,8 +327,16 @@ function ConnectView({
   onProfileNameChange,
   onSaveProfile,
   onDeleteProfile,
+  onRenameProfile,
   onConnect,
 }: ConnectViewProps) {
+  const selected = tab.selectedProfileId
+    ? profiles.find((p) => p.id === tab.selectedProfileId)
+    : undefined;
+  const passwordHint =
+    selected?.passwordKeyringRef !== undefined
+      ? 'Leave empty to use the password stored in your keyring for this profile.'
+      : undefined;
   return (
     <main className="mx-auto flex flex-1 w-full max-w-4xl flex-col gap-6 overflow-y-auto p-6">
       <header>
@@ -302,6 +353,7 @@ function ConnectView({
         onNameChange={onProfileNameChange}
         onSave={onSaveProfile}
         onDelete={onDeleteProfile}
+        onRename={onRenameProfile}
       />
 
       <ConnectionPanel
@@ -309,6 +361,7 @@ function ConnectView({
         busy={tab.busy}
         onChange={onFieldChange}
         onSubmit={onConnect}
+        {...(passwordHint !== undefined && { passwordHint })}
       />
 
       {tab.error && (
