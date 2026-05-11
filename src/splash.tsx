@@ -23,7 +23,13 @@ function Splash() {
   }, []);
 
   return (
-    <div className="flex h-screen w-screen flex-col justify-end rounded-xl bg-zinc-900/90 p-6 backdrop-blur">
+    <div className="flex h-screen w-screen flex-col justify-between rounded-xl bg-zinc-900/90 p-6 backdrop-blur">
+      <img
+        src="/favicon/favicon-192.png"
+        alt=""
+        aria-hidden="true"
+        className="h-16 w-16 self-start"
+      />
       <div>
         <div className="text-lg font-semibold">Plamenix</div>
         <div className="text-xs text-zinc-400">Firebird IDE — 1.0.0-beta</div>
