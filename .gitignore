@@ -34,3 +34,4 @@ Cargo.lock.bak
 
 # OS
 Thumbs.db
+resources/fbclient/

@@ -2767,6 +2767,7 @@ dependencies = [
  "percent-encoding",
  "rsfbclient-core",
  "rsfbclient-derive",
+ "rsfbclient-native",
  "rsfbclient-rust",
  "url",
 ]
@@ -2792,6 +2793,18 @@ checksum = "610cc23eb9e21cfee324f2826173a49478a0302ad045f3b39166aed5c20a539c"
 dependencies = [
  "quote",
  "syn 1.0.109",
+]
+
+[[package]]
+name = "rsfbclient-native"
+version = "0.26.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "7f84bc92a9eed7eb4c895109ed04619a64ae7d10192fbf8bd7d9b30898c2dc9d"
+dependencies = [
+ "byteorder",
+ "glob",
+ "libloading",
+ "rsfbclient-core",
 ]
 
 [[package]]
