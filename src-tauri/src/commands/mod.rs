@@ -1,3 +1,5 @@
+pub mod db;
+
 use tauri::AppHandle;
 
 #[tauri::command]

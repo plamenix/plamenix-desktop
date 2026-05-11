@@ -20,14 +20,16 @@ src/                    React renderer
   styles/globals.css    Tailwind 4 entry
 
 src-tauri/              Rust backend
-  Cargo.toml            crate `plamenix-desktop`, depends on `plamenix-types`
+  Cargo.toml            crate `plamenix-desktop`, depends on `plamenix-types` and `plamenix-db`
   build.rs              `tauri_build::build()`
   tauri.conf.json       two windows (splash visible, main hidden until boot:ready)
   capabilities/         per-window capability files
   src/main.rs           binary entry, tracing init, delegates to lib::run()
   src/lib.rs            tauri::Builder, command handlers, splash orchestration
   src/boot.rs           boot:step / finish helpers
-  src/commands/mod.rs   tauri::command handlers (ping for now)
+  src/db.rs             Tauri-managed wrapper around the shared RsfbDriver
+  src/commands/mod.rs   ping
+  src/commands/db.rs    db_connect / db_execute / db_ping / db_close
 
 index.html              main-window HTML shell
 splash.html             splash-window HTML shell

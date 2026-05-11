@@ -20,11 +20,12 @@ tauri = { version = "2", features = [] }
 tauri-plugin-log = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 plamenix-types = { path = "../../plamenix-core/crates/plamenix-types" }
+plamenix-db = { path = "../../plamenix-core/crates/plamenix-db", default-features = false, features = ["pure-rust"] }
 
 [lints.rust]
 unsafe_code = "forbid"

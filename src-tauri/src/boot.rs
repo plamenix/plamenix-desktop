@@ -13,21 +13,21 @@ impl BootStep {
     }
 }
 
-pub fn emit_step(app: &AppHandle, step: BootStep) {
-    if let Err(err) = app.emit("boot:step", &step) {
+pub fn emit_step(app: &AppHandle, step: &BootStep) {
+    if let Err(err) = app.emit("boot:step", step) {
         tracing::warn!(?err, "failed to emit boot:step");
     }
 }
 
 pub fn finish(app: &AppHandle) {
-    if let Some(splash) = app.get_webview_window("splash") {
-        if let Err(err) = splash.close() {
-            tracing::warn!(?err, "failed to close splash window");
-        }
+    if let Some(splash) = app.get_webview_window("splash")
+        && let Err(err) = splash.close()
+    {
+        tracing::warn!(?err, "failed to close splash window");
     }
-    if let Some(main) = app.get_webview_window("main") {
-        if let Err(err) = main.show() {
-            tracing::warn!(?err, "failed to show main window");
-        }
+    if let Some(main) = app.get_webview_window("main")
+        && let Err(err) = main.show()
+    {
+        tracing::warn!(?err, "failed to show main window");
     }
 }
