@@ -17,19 +17,37 @@ tauri-build = { version = "2", features = [] }
 
 [dependencies]
 tauri = { version = "2", features = ["macos-private-api", "devtools"] }
+tauri-plugin-dialog = "2"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "io-util", "process", "fs"] }
 thiserror = "2"
 tracing = "0.1"
-tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+reqwest = { version = "0.12", default-features = false, features = ["default-tls", "stream", "http2", "charset"] }
+futures-util = "0.3"
+tar = "0.4"
+flate2 = "1"
+zip = { version = "2", default-features = false, features = ["deflate"] }
+tempfile = "3"
 plamenix-types = { path = "../../plamenix-core/crates/plamenix-types" }
 plamenix-db = { path = "../../plamenix-core/crates/plamenix-db", default-features = false, features = ["pure-rust", "native"] }
 plamenix-profiles = { path = "../../plamenix-core/crates/plamenix-profiles" }
 plamenix-secrets = { path = "../../plamenix-core/crates/plamenix-secrets" }
+plamenix-plugin-host = { path = "../../plamenix-core/crates/plamenix-plugin-host" }
+plamenix-tracing = { path = "../../plamenix-core/crates/plamenix-tracing", features = ["otlp"] }
+semver = "1"
+rusqlite = { version = "0.32", features = ["bundled"] }
+uuid = { version = "1", features = ["v4"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.5"
 
 [lints.rust]
-unsafe_code = "forbid"
+# `deny` (not `forbid`) so the macOS app-activation workaround in
+# `boot::finish` can `#[allow(unsafe_code)]` a single block. Tauri 2.11's
+# `WebviewWindow::set_focus` is a no-op on macOS (tauri-apps/tauri#12834)
+# and we have to call `[NSApp activateIgnoringOtherApps:YES]` ourselves.
+unsafe_code = "deny"
 
 [lints.clippy]
 pedantic = { level = "warn", priority = -1 }
@@ -37,3 +55,9 @@ nursery = { level = "warn", priority = -1 }
 module_name_repetitions = "allow"
 missing_errors_doc = "allow"
 missing_panics_doc = "allow"
+
+[patch.crates-io]
+# Same vendored rsfbclient-native patch the workspace uses. Mirrored
+# here because the desktop Cargo project is not part of the
+# plamenix-core workspace.
+rsfbclient-native = { path = "../../plamenix-core/vendor/rsfbclient-native" }

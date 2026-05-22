@@ -1,4 +1,7 @@
 pub mod db;
+pub mod export;
+pub mod fbclient;
+pub mod plugins;
 pub mod profiles;
 
 use tauri::AppHandle;

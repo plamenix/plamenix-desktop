@@ -12,13 +12,14 @@
 use plamenix_db::{ConnectMode, DbDriver, SessionId};
 use plamenix_profiles::{
     ConnectOverrides, Profile, ProfileId, ProfileStore, RuntimeSecrets,
-    resolve_connection_config, resolve_pure_rust,
+    now_epoch_ms, resolve_connection_config, resolve_pure_rust,
 };
 use plamenix_secrets::{SecretRef, SecretStore};
 use serde::{Deserialize, Serialize};
-use tauri::State;
+use tauri::{AppHandle, State};
 
 use crate::db::DbState;
+use crate::fbclient::bundled_path;
 use crate::profiles::ProfilesState;
 
 #[derive(Debug, Deserialize)]
@@ -41,6 +42,19 @@ pub struct ProfileDraft {
     /// Same shape as `password`, stored under
     /// `profile:<id>:encryption-key`.
     pub encryption_key: Option<String>,
+    /// Optional accent-palette id used by the UI to tint this profile's
+    /// tabs and status dot.
+    #[serde(default)]
+    pub color: Option<String>,
+    /// Optional absolute path to the Firebird native client library
+    /// (`libfbclient.dylib` / `.so` / `fbclient.dll`). Empty string is
+    /// treated as `None`. Ignored when `pure_rust` is `true`.
+    #[serde(default)]
+    pub fbclient_path: Option<String>,
+    /// Wire charset for the session. Empty string is treated as `None`,
+    /// which falls back to `UTF8`.
+    #[serde(default)]
+    pub charset: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -52,6 +66,7 @@ pub struct ProfileConnectRequest {
     pub pure_rust: Option<bool>,
     pub encryption_required: Option<bool>,
     pub fbclient_path: Option<String>,
+    pub charset: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -61,16 +76,23 @@ pub struct ConnectResponse {
 }
 
 #[tauri::command]
+#[tracing::instrument(name = "cmd.profile_list", skip(state))]
 pub fn profile_list(state: State<'_, ProfilesState>) -> Result<Vec<Profile>, String> {
     state.store.list().map_err(|err| err.to_string())
 }
 
 #[tauri::command]
+#[tracing::instrument(
+    name = "cmd.profile_save",
+    skip(state, draft),
+    fields(name = %draft.name, profile = ?draft.id),
+)]
 pub fn profile_save(
     state: State<'_, ProfilesState>,
     draft: ProfileDraft,
 ) -> Result<Profile, String> {
     let id = draft.id.unwrap_or_default();
+    let now = now_epoch_ms();
     let mut profile = Profile {
         id,
         name: draft.name,
@@ -82,11 +104,24 @@ pub fn profile_save(
         encryption_key_keyring_ref: None,
         encryption_required: draft.encryption_required,
         pure_rust: draft.pure_rust,
+        color: draft.color,
+        created_at: now,
+        last_used_at: None,
+        last_disconnected_at: None,
+        fbclient_path: draft.fbclient_path.filter(|s| !s.is_empty()),
+        charset: draft.charset.filter(|s| !s.is_empty()),
     };
 
     if let Ok(existing) = state.store.get(id) {
         profile.password_keyring_ref = existing.password_keyring_ref;
         profile.encryption_key_keyring_ref = existing.encryption_key_keyring_ref;
+        // Preserve the original creation timestamp on edits; only the
+        // very first save fixes `created_at`.
+        if existing.created_at != 0 {
+            profile.created_at = existing.created_at;
+        }
+        profile.last_used_at = existing.last_used_at;
+        profile.last_disconnected_at = existing.last_disconnected_at;
     }
 
     if let Some(value) = draft.password {
@@ -116,6 +151,7 @@ pub fn profile_save(
 }
 
 #[tauri::command]
+#[tracing::instrument(name = "cmd.profile_delete", skip(state), fields(profile = %id.0))]
 pub fn profile_delete(
     state: State<'_, ProfilesState>,
     id: ProfileId,
@@ -132,7 +168,13 @@ pub fn profile_delete(
 }
 
 #[tauri::command]
+#[tracing::instrument(
+    name = "cmd.profile_connect",
+    skip(profiles, db, request),
+    fields(profile = %request.profile_id.0),
+)]
 pub async fn profile_connect(
+    app: AppHandle,
     profiles: State<'_, ProfilesState>,
     db: State<'_, DbState>,
     request: ProfileConnectRequest,
@@ -150,9 +192,10 @@ pub async fn profile_connect(
         pure_rust: request.pure_rust,
         encryption_required: request.encryption_required,
         fbclient_path: request.fbclient_path,
+        charset: request.charset,
     };
 
-    let config = resolve_connection_config(
+    let mut config = resolve_connection_config(
         &profile,
         &profiles.secrets,
         &profiles.service,
@@ -161,15 +204,36 @@ pub async fn profile_connect(
     )
     .map_err(|err| err.to_string())?;
 
-    let mode = if resolve_pure_rust(&profile, &overrides) {
-        ConnectMode::PureRust
-    } else {
-        ConnectMode::Native
-    };
+    let pure_rust = resolve_pure_rust(&profile, &overrides);
+    let mode = if pure_rust { ConnectMode::PureRust } else { ConnectMode::Native };
+    if !pure_rust
+        && config.fbclient_path.is_none()
+        && let Some(path) = bundled_path(&app)
+    {
+        config.fbclient_path = Some(path.to_string_lossy().into_owned());
+    }
 
-    db.driver()
-        .connect(config, mode)
-        .await
+    let outcome = db.driver().connect(config, mode).await;
+    if outcome.is_ok() {
+        // Best-effort: a touch failure should never break a working
+        // connect. Log it and move on.
+        if let Err(err) = profiles.store.touch(request.profile_id, now_epoch_ms()) {
+            tracing::warn!(?err, "profile touch failed");
+        }
+    }
+    outcome
         .map(|session_id| ConnectResponse { session_id })
+        .map_err(|err| err.to_string())
+}
+
+#[tauri::command]
+#[tracing::instrument(name = "cmd.profile_touch_disconnected", skip(state), fields(profile = %id.0))]
+pub fn profile_touch_disconnected(
+    state: State<'_, ProfilesState>,
+    id: ProfileId,
+) -> Result<(), String> {
+    state
+        .store
+        .touch_disconnected(id, now_epoch_ms())
         .map_err(|err| err.to_string())
 }

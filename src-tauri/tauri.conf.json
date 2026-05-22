@@ -34,11 +34,13 @@
         "minWidth": 960,
         "minHeight": 600,
         "visible": false,
-        "title": "Plamenix"
+        "title": "Plamenix",
+        "backgroundColor": "#13161f",
+        "theme": "Dark"
       }
     ],
     "security": {
-      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: asset: https://asset.localhost; style-src 'self' 'unsafe-inline'; script-src 'self'"
+      "csp": "default-src 'self'; connect-src 'self' ipc: http://ipc.localhost; img-src 'self' data: blob: asset: https://asset.localhost; object-src 'self' blob:; frame-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'"
     }
   },
   "bundle": {
@@ -52,8 +54,17 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "resources": {
+      "../resources/plugins": "plugins",
+      "../resources/fbclient": "fbclient"
+    },
     "category": "DeveloperTool",
     "shortDescription": "Plamenix — Firebird IDE",
-    "longDescription": "Plamenix is an open-source IDE for Firebird databases."
+    "longDescription": "Plamenix is an open-source IDE for Firebird databases.",
+    "macOS": {
+      "signingIdentity": "-",
+      "hardenedRuntime": true,
+      "minimumSystemVersion": "11.0"
+    }
   }
 }

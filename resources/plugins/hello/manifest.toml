@@ -1,0 +1,23 @@
+#:schema https://plamenix.dev/schemas/plugin-manifest-1.0.0.json
+
+[plugin]
+id = "dev.plamenix.hello"
+name = "Hello"
+version = "1.0.0"
+plamenix_min_version = ">=1.0.0-beta"
+plugin_api = "1.0"
+description = "Smoke-test plugin. Contributes one sidebar panel and emits a single info-level log line on activation."
+author = "Plamenix"
+license = "MIT OR Apache-2.0"
+
+[permissions]
+required = ["db.schema.list"]
+optional = ["os.notify", "clipboard.read"]
+
+[entry_points]
+wasm = "hello-plugin.wasm"
+
+[[contributions.sidebar_panels]]
+id = "hello-panel"
+label = "Hello Plugin"
+icon = "sparkles"

@@ -14,6 +14,13 @@ dev:
 build:
     pnpm tauri build
 
+# Populate resources/fbclient/v<XY>/ for the host platform so the
+# installer can ship a working native fbclient. Run once per platform
+# before `just build`. Override version with `just fetch-fbclient
+# 4.0.5`. Files are gitignored.
+fetch-fbclient version='5.0.3':
+    scripts/fetch-fbclient.sh {{version}}
+
 # Type-check React side
 typecheck:
     pnpm tsc --noEmit

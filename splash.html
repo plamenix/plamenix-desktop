@@ -6,8 +6,18 @@
     <link rel="icon" href="/favicon/favicon.ico" sizes="any" />
     <link rel="icon" type="image/png" sizes="192x192" href="/favicon/favicon-192.png" />
     <title>Plamenix — loading</title>
+    <style>
+      /* Override shared theme.css `body { background-color: var(--color-canvas) }`
+         so the rounded-xl splash card sits on a transparent window — the
+         corners outside the rounded shape stay see-through. */
+      html,
+      body,
+      #splash-root {
+        background: transparent !important;
+      }
+    </style>
   </head>
-  <body class="bg-transparent text-zinc-100 antialiased">
+  <body class="text-zinc-100 antialiased">
     <div id="splash-root"></div>
     <script type="module" src="/src/splash.tsx"></script>
   </body>

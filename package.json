@@ -24,6 +24,8 @@
     "@plamenix/ui": "link:../plamenix-ui",
     "@tanstack/react-query": "^5.100.0",
     "@tauri-apps/api": "^2.11.0",
+    "@tauri-apps/plugin-dialog": "^2",
+    "lucide-react": "^1.14.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0",
     "zustand": "^5.0.0"

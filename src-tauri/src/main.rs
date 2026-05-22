@@ -3,12 +3,27 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 fn main() {
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
-        )
-        .init();
+    let _tracing_guard = match plamenix_tracing::init() {
+        Ok((guard, outcome)) => {
+            match &outcome {
+                plamenix_tracing::InitOutcome::FmtOnly => {
+                    tracing::info!("tracing initialised (fmt only)");
+                }
+                plamenix_tracing::InitOutcome::OtlpEnabled {
+                    endpoint,
+                    service_name,
+                } => {
+                    tracing::info!(%endpoint, %service_name, "tracing initialised with OTLP exporter");
+                }
+                _ => tracing::info!("tracing initialised"),
+            }
+            Some(guard)
+        }
+        Err(err) => {
+            eprintln!("failed to initialise tracing: {err}");
+            None
+        }
+    };
 
     plamenix_desktop_lib::run();
 }
