@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use plamenix_db::{
     ColumnValue, ConnectMode, ConnectionConfig, CryptState, DbDriver, QueryResult, Schema,
-    SessionId, StatementOutcome, accepts_row_limit, inject_row_limit, split_statements,
+    SessionId, StatementOutcome, TxConfig, TxMode, TxStatus, accepts_row_limit, inject_row_limit,
+    split_statements,
 };
 use plamenix_types::{
     DatabaseAlias, DatabaseStats, HistoryEntry, ListAliasesResult, TestConnectionResult,
@@ -281,6 +282,85 @@ pub async fn db_close(
     session_id: SessionId,
 ) -> Result<(), String> {
     state.driver().close(session_id).await.map_err(|err| err.to_string())
+}
+
+/// Switches a session between autocommit and manual commit.
+///
+/// Refused while a transaction is open — the caller must commit or roll
+/// back first, so no work is silently discarded or silently committed
+/// by a mode change.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_set_transaction_mode", skip(state), fields(session = %session_id.0, ?mode))]
+pub async fn db_set_transaction_mode(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+    mode: TxMode,
+    config: TxConfig,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .set_transaction_mode(session_id, mode, config)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Opens an explicit transaction. Manual mode opens one on the first
+/// statement, so this is only for starting one deliberately.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_begin_transaction", skip(state), fields(session = %session_id.0))]
+pub async fn db_begin_transaction(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .begin_transaction(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Commits the open transaction.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_commit", skip(state), fields(session = %session_id.0))]
+pub async fn db_commit(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .commit(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Rolls back the open transaction, discarding every statement since it
+/// opened — DDL included.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_rollback", skip(state), fields(session = %session_id.0))]
+pub async fn db_rollback(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .rollback(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Current transaction state. Answered from driver state without
+/// touching the engine, so the UI can poll it for the age readout.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_transaction_status", skip(state), fields(session = %session_id.0))]
+pub async fn db_transaction_status(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .transaction_status(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
