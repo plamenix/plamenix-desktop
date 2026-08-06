@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use plamenix_plugin_host::{
-    ActivationOutcome, HostState, LogLevel, Permission, PluginError, PluginHost, RecordedLog,
-    SidebarPanel, activate_with_state, load,
+    ActivationOutcome, HostState, InstanceRegistry, LogLevel, Permission, PluginError, PluginHost,
+    RecordedLog, SidebarPanel, activate_into_registry, load,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -97,6 +97,14 @@ pub enum ActivationInfo {
 pub struct PluginsState {
     plugins: Mutex<Vec<ActivePlugin>>,
     grants: Arc<GrantStore>,
+    /// Live wasmtime instances, keyed by plugin id.
+    ///
+    /// Activation used to drop its `Store` the moment `activate()`
+    /// returned, so the plugin's linear memory went with it and there
+    /// was nowhere to dispatch a later call. Holding the instances here
+    /// — for the process lifetime, in Tauri's managed state — is what
+    /// makes events, commands and supervision possible at all.
+    instances: Arc<InstanceRegistry>,
 }
 
 impl PluginsState {
@@ -104,7 +112,14 @@ impl PluginsState {
         Self {
             plugins: Mutex::new(Vec::new()),
             grants,
+            instances: Arc::new(InstanceRegistry::new()),
         }
+    }
+
+    /// The live instance registry. Shared so the boot path can register
+    /// into the same map the commands later read.
+    pub fn instances(&self) -> Arc<InstanceRegistry> {
+        Arc::clone(&self.instances)
     }
 
     pub fn snapshot(&self) -> Vec<ActivePlugin> {
@@ -262,6 +277,7 @@ pub async fn bootstrap(
     host_version: &Version,
     plugins_root: &Path,
     grants: &GrantStore,
+    instances: &InstanceRegistry,
 ) -> Vec<ActivePlugin> {
     let mut out = Vec::new();
 
@@ -282,7 +298,7 @@ pub async fn bootstrap(
         if !path.is_dir() {
             continue;
         }
-        match load_and_activate(host, host_version, &path, grants).await {
+        match load_and_activate(host, host_version, &path, grants, instances).await {
             Ok(active) => out.push(active),
             Err(err) => {
                 tracing::warn!(?err, ?path, "plugin failed to load");
@@ -297,6 +313,7 @@ async fn load_and_activate(
     host_version: &Version,
     bundle: &Path,
     grants: &GrantStore,
+    instances: &InstanceRegistry,
 ) -> Result<ActivePlugin, PluginError> {
     let staged = load(host, host_version, bundle)?;
     let manifest = staged.manifest.clone();
@@ -305,7 +322,11 @@ async fn load_and_activate(
     let state = HostState::new(&manifest.plugin.id, host_version.to_string())
         .with_log_sink(log_sink.clone());
 
-    let outcome = activate_with_state(host, state, &staged).await?;
+    // Registers the live store rather than dropping it when `activate`
+    // returns. A failed activation is not registered — the activator
+    // drops that store itself — so the registry only ever holds
+    // instances that are actually usable.
+    let outcome = activate_into_registry(host, state, &staged, instances).await?;
 
     let logs: Vec<PluginLogEntry> = log_sink
         .lock()

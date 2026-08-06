@@ -105,9 +105,29 @@ pub fn run() {
                     Version::parse(env!("CARGO_PKG_VERSION")).unwrap_or_else(|_| Version::new(1, 0, 0));
                 match PluginHost::new() {
                     Ok(host) => {
-                        let active =
-                            plugin_bootstrap(&host, &host_version, &plugins_root, &grants_store)
-                                .await;
+                        // The registry lives in PluginsState, so the
+                        // instances registered here outlive this boot
+                        // task and stay reachable from the commands.
+                        let instances = match handle.try_state::<PluginsState>() {
+                            Some(state) => state.instances(),
+                            None => {
+                                tracing::error!(
+                                    "PluginsState not registered before plugin bootstrap; \
+                                     activating without a live instance registry",
+                                );
+                                std::sync::Arc::new(
+                                    plamenix_plugin_host::InstanceRegistry::new(),
+                                )
+                            }
+                        };
+                        let active = plugin_bootstrap(
+                            &host,
+                            &host_version,
+                            &plugins_root,
+                            &grants_store,
+                            &instances,
+                        )
+                        .await;
                         let count = active.len();
                         match handle.try_state::<PluginsState>() {
                             Some(state) => {
