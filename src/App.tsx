@@ -92,6 +92,11 @@ import {
   type SchemaAction,
   type SchemaDdl,
   type TestConnectionResult,
+  TransactionBar,
+  hasUncommittedWork,
+  type TxConfig,
+  type TxMode,
+  type TxStatus,
 } from '@plamenix/ui';
 import {
   ChartLine as ChartLineIcon,
@@ -319,7 +324,7 @@ export function App() {
   const [statsFetchedAt, setStatsFetchedAt] = useState<number | null>(null);
   const [statsTick, setStatsTick] = useState(0);
 
-const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
+  const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
   const [openPluginPanel, setOpenPluginPanel] = useState<{
     plugin: ActivePlugin;
     panel: SidebarPanelInfo;
@@ -400,29 +405,27 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
     }
   }, []);
 
-  const refreshStats = useCallback(
-    async (sessionId: string) => {
-      setStatsLoading(true);
-      setStatsError(null);
-      try {
-        const next = await tauriTransport.invoke<DatabaseStats>('db_database_stats', {
-          sessionId,
-        });
-        setStats(next);
-        setStatsFetchedAt(Date.now());
-      } catch (err) {
-        setStatsError(String(err));
-      } finally {
-        setStatsLoading(false);
-      }
-    },
-    [],
-  );
+  const refreshStats = useCallback(async (sessionId: string) => {
+    setStatsLoading(true);
+    setStatsError(null);
+    try {
+      const next = await tauriTransport.invoke<DatabaseStats>('db_database_stats', {
+        sessionId,
+      });
+      setStats(next);
+      setStatsFetchedAt(Date.now());
+    } catch (err) {
+      setStatsError(String(err));
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
 
   const computeRowCounts = useCallback(async () => {
     const tab = activeTab;
     if (!tab.sessionId || !tab.schema) return [];
-    const out: { name: string; kind: 'table' | 'view'; count: number | null; error?: string }[] = [];
+    const out: { name: string; kind: 'table' | 'view'; count: number | null; error?: string }[] =
+      [];
     for (const t of tab.schema.tables) {
       const ident = `"${t.name.replace(/"/g, '""')}"`;
       try {
@@ -440,18 +443,12 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
             name: t.name,
             kind: t.kind === 'view' ? 'view' : 'table',
             count: null,
-            error:
-              first?.status === 'err'
-                ? first.error
-                : 'count produced no row',
+            error: first?.status === 'err' ? first.error : 'count produced no row',
           });
           continue;
         }
         const cell = first.result.Rows.rows[0]?.cells[0];
-        const count =
-          cell?.type === 'integer' && cell.value !== null
-            ? Number(cell.value)
-            : null;
+        const count = cell?.type === 'integer' && cell.value !== null ? Number(cell.value) : null;
         out.push({
           name: t.name,
           kind: t.kind === 'view' ? 'view' : 'table',
@@ -616,35 +613,26 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
     }
   }, [activeTab, activeTabId, patchTab]);
 
-  const deleteHistoryEntry = useCallback(
-    async (id: number) => {
-      await tauriTransport.invoke<boolean>('history_delete', { id });
-      setHistoryEntries((prev) => (prev ? prev.filter((e) => e.id !== id) : prev));
-    },
-    [],
-  );
+  const deleteHistoryEntry = useCallback(async (id: number) => {
+    await tauriTransport.invoke<boolean>('history_delete', { id });
+    setHistoryEntries((prev) => (prev ? prev.filter((e) => e.id !== id) : prev));
+  }, []);
 
-  const deleteHistoryEntries = useCallback(
-    async (ids: number[]) => {
-      if (ids.length === 0) return;
-      await tauriTransport.invoke<number>('history_delete_many', {
-        request: { ids },
-      });
-      const drop = new Set(ids);
-      setHistoryEntries((prev) =>
-        prev ? prev.filter((e) => !drop.has(e.id)) : prev,
-      );
-    },
-    [],
-  );
+  const deleteHistoryEntries = useCallback(async (ids: number[]) => {
+    if (ids.length === 0) return;
+    await tauriTransport.invoke<number>('history_delete_many', {
+      request: { ids },
+    });
+    const drop = new Set(ids);
+    setHistoryEntries((prev) => (prev ? prev.filter((e) => !drop.has(e.id)) : prev));
+  }, []);
 
   const setHistoryLabel = useCallback(
     async (id: number, label: string | null) => {
       await tauriTransport.invoke<boolean>('history_set_label', {
         request: { id, label },
       });
-      const normalized =
-        label && label.trim().length > 0 ? label.trim() : null;
+      const normalized = label && label.trim().length > 0 ? label.trim() : null;
       // Apply the change in-place rather than re-fetching the whole
       // list — keeps the optimistic UX snappy and avoids the modal
       // flickering when the panel is wide.
@@ -683,11 +671,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
   const handleBrowseFbclient = useCallback(async (): Promise<string | null> => {
     const isMac = navigator.platform.toLowerCase().includes('mac');
     const isWindows = navigator.platform.toLowerCase().includes('win');
-    const extensions = isMac
-      ? ['dylib']
-      : isWindows
-      ? ['dll']
-      : ['so', 'so.*'];
+    const extensions = isMac ? ['dylib'] : isWindows ? ['dll'] : ['so', 'so.*'];
     const result = await openDialog({
       multiple: false,
       directory: false,
@@ -716,20 +700,15 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
     return inspection;
   }, []);
 
-  const handleDownloadFbclient = useCallback(
-    async (version?: string): Promise<string> => {
-      const res = await tauriTransport.invoke<{ path: string; version: string }>(
-        'fbclient_download',
-        version === undefined ? {} : { version },
-      );
-      return res.path;
-    },
-    [],
-  );
+  const handleDownloadFbclient = useCallback(async (version?: string): Promise<string> => {
+    const res = await tauriTransport.invoke<{ path: string; version: string }>(
+      'fbclient_download',
+      version === undefined ? {} : { version },
+    );
+    return res.path;
+  }, []);
 
-  const [fbclientReleases, setFbclientReleases] = useState<
-    { version: string }[] | null
-  >(null);
+  const [fbclientReleases, setFbclientReleases] = useState<{ version: string }[] | null>(null);
   useEffect(() => {
     void tauriTransport
       .invoke<{ version: string; major: string }[]>('fbclient_list_releases')
@@ -874,8 +853,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
           encryptionKey: activeTab.form.encryptionKey === '' ? null : activeTab.form.encryptionKey,
           pureRust: profile.pureRust,
           encryptionRequired: profile.encryptionRequired,
-          fbclientPath:
-            activeTab.form.fbclientPath === '' ? null : activeTab.form.fbclientPath,
+          fbclientPath: activeTab.form.fbclientPath === '' ? null : activeTab.form.fbclientPath,
         },
       });
       patchTab(tabId, {
@@ -889,6 +867,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       void refreshCryptState(tabId, response.sessionId);
       void refreshSchema(tabId, response.sessionId);
       void refreshEngineVersion(tabId, response.sessionId);
+      void refreshTxStatus(tabId, response.sessionId);
     } catch (err) {
       patchTab(tabId, { error: String(err) });
     } finally {
@@ -1127,8 +1106,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       patchTab(tabId, { error: editorDecision.reason });
       return;
     }
-    const sqlAfterEditor =
-      editorDecision.action === 'replace' ? editorDecision.ctx.sql : sqlAtSend;
+    const sqlAfterEditor = editorDecision.action === 'replace' ? editorDecision.ctx.sql : sqlAtSend;
     const queryDecision = await queryExecutingChain.run({
       tabId,
       sessionId: tab.sessionId,
@@ -1138,8 +1116,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       patchTab(tabId, { error: queryDecision.reason });
       return;
     }
-    const sql =
-      queryDecision.action === 'replace' ? queryDecision.ctx.sql : sqlAfterEditor;
+    const sql = queryDecision.action === 'replace' ? queryDecision.ctx.sql : sqlAfterEditor;
     const key = recentKeyOf(tab.form, tab.profileName);
     const startedAt = Date.now();
     patchTab(tabId, { error: null, busy: true });
@@ -1160,6 +1137,9 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       });
       notifyMutations(res);
       recordExec(key, sql, startedAt, res, null);
+      // Manual mode opens the transaction on the first statement and
+      // counts each one after that, so the indicator needs a refresh.
+      if (tab.sessionId) void refreshTxStatus(tabId, tab.sessionId);
     } catch (err) {
       patchTab(tabId, { error: String(err) });
       recordExec(key, sql, startedAt, null, String(err));
@@ -1224,17 +1204,14 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       const key = recentKeyOf(tab.form, tab.profileName);
       const startedAt = Date.now();
       try {
-        const outcomes = await tauriTransport.invoke<StatementOutcome[]>(
-          'db_execute',
-          {
-            request: {
-              sessionId: tab.sessionId,
-              sql,
-              profileId: tab.selectedProfileId,
-              historyLimit: currentHistoryLimit(),
-            },
+        const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+          request: {
+            sessionId: tab.sessionId,
+            sql,
+            profileId: tab.selectedProfileId,
+            historyLimit: currentHistoryLimit(),
           },
-        );
+        });
         for (const outcome of outcomes) {
           if (outcome.status === 'err') throw new Error(outcome.error);
         }
@@ -1254,7 +1231,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       const startedAt = Date.now();
       const scopeLabel =
         req.scope.kind === 'statement'
-          ? req.scope.label ?? req.scope.table?.name ?? req.scope.sql.slice(0, 80)
+          ? (req.scope.label ?? req.scope.table?.name ?? req.scope.sql.slice(0, 80))
           : req.scope.tables.map((t) => t.name).join(', ');
       const tables =
         req.scope.kind === 'statement'
@@ -1293,24 +1270,18 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       let expectedId: string | null = null;
       const unsubs: (() => void)[] = [];
       unsubs.push(
-        await listen<{ exportId: string; seq: number; text: string }>(
-          'export:chunk',
-          (event) => {
-            if (expectedId === null || event.payload.exportId === expectedId) {
-              chunks[event.payload.seq] = event.payload.text;
-            }
-          },
-        ),
+        await listen<{ exportId: string; seq: number; text: string }>('export:chunk', (event) => {
+          if (expectedId === null || event.payload.exportId === expectedId) {
+            chunks[event.payload.seq] = event.payload.text;
+          }
+        }),
       );
       unsubs.push(
-        await listen<{ exportId: string; totalBytes: number }>(
-          'export:done',
-          (event) => {
-            if (expectedId === null || event.payload.exportId === expectedId) {
-              resolveDone?.();
-            }
-          },
-        ),
+        await listen<{ exportId: string; totalBytes: number }>('export:done', (event) => {
+          if (expectedId === null || event.payload.exportId === expectedId) {
+            resolveDone?.();
+          }
+        }),
       );
       unsubs.push(
         await listen<{ exportId: string; error: string }>('export:err', (event) => {
@@ -1341,10 +1312,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
         const blob = new Blob([body], {
           type: `${mime[req.format] ?? 'application/octet-stream'};charset=utf-8`,
         });
-        const stamp = new Date()
-          .toISOString()
-          .replace(/[-:T]/g, '')
-          .slice(0, 15);
+        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
         emitExportCompleted({
           exportId,
           durationMs: Date.now() - startedAt,
@@ -1378,17 +1346,14 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table.name)
         ? table.name
         : `"${table.name.replace(/"/g, '""')}"`;
-      const outcomes = await tauriTransport.invoke<StatementOutcome[]>(
-        'db_execute',
-        {
-          request: {
-            sessionId: tab.sessionId,
-            sql: `SELECT * FROM ${quoted}`,
-            profileId: tab.selectedProfileId,
-            historyLimit: currentHistoryLimit(),
-          },
+      const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+        request: {
+          sessionId: tab.sessionId,
+          sql: `SELECT * FROM ${quoted}`,
+          profileId: tab.selectedProfileId,
+          historyLimit: currentHistoryLimit(),
         },
-      );
+      });
       const first = outcomes[0];
       if (!first) throw new Error(`No outcome for ${table.name}.`);
       if (first.status === 'err') throw new Error(`${table.name}: ${first.error}`);
@@ -1410,30 +1375,34 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       if (!tab.sessionId) throw new Error('No active session.');
       // `quoteIdentBare` keeps existing all-upper identifiers bare (the
       // Firebird-friendly form) and quotes lowercase/mixed names.
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table)
-        ? table
-        : `"${table.replace(/"/g, '""')}"`;
+      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table) ? table : `"${table.replace(/"/g, '""')}"`;
       const sql = predicate
         ? `SELECT COUNT(*) FROM ${quoted} WHERE ${predicate}`
         : `SELECT COUNT(*) FROM ${quoted}`;
-      const outcomes = await tauriTransport.invoke<StatementOutcome[]>(
-        'db_execute',
-        {
-          request: {
-            sessionId: tab.sessionId,
-            sql,
-            profileId: tab.selectedProfileId,
-            historyLimit: currentHistoryLimit(),
-          },
+      const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+        request: {
+          sessionId: tab.sessionId,
+          sql,
+          profileId: tab.selectedProfileId,
+          historyLimit: currentHistoryLimit(),
         },
-      );
+      });
       const first = outcomes[0];
       if (!first || first.status !== 'ok' || !('Rows' in first.result)) {
         throw new Error('COUNT(*) did not return a row.');
       }
       const cell = first.result.Rows.rows[0]?.cells[0];
       if (!cell) throw new Error('COUNT(*) returned an empty row.');
-      if (cell.type === 'integer') return cell.value;
+      if (cell.type === 'integer') {
+        // Integers cross the wire as exact decimal text so a BIGINT
+        // survives the JSON hop. A row count is bounded by what the UI
+        // can page through, so narrowing it here is safe.
+        const parsed = Number(cell.value);
+        if (!Number.isFinite(parsed)) {
+          throw new Error(`COUNT(*) returned an unparseable value: ${cell.value}.`);
+        }
+        return parsed;
+      }
       if (cell.type === 'float' && typeof cell.value === 'number') {
         return cell.value;
       }
@@ -1446,9 +1415,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
     async ({ table, predicate }: { table: string; predicate: string | null }) => {
       const tab = activeTab;
       if (!tab.sessionId) throw new Error('No active session.');
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table)
-        ? table
-        : `"${table.replace(/"/g, '""')}"`;
+      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table) ? table : `"${table.replace(/"/g, '""')}"`;
       const sql = predicate
         ? `SELECT * FROM ${quoted} WHERE ${predicate}`
         : `SELECT * FROM ${quoted}`;
@@ -1475,9 +1442,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       const tabId = activeTabId;
       const tab = activeTab;
       if (!tab.sessionId) return;
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(name)
-        ? name
-        : `"${name.replace(/"/g, '""')}"`;
+      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
       const sql = `SELECT * FROM ${quoted}`;
       const key = recentKeyOf(tab.form, tab.profileName);
       const startedAt = Date.now();
@@ -1635,10 +1600,84 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
     }
   };
 
+  /// Pulls the session's transaction state into the tab.
+  ///
+  /// Called after anything that can change it — connect, execute,
+  /// commit, rollback — so the indicator reflects the session rather
+  /// than what the UI last assumed.
+  const refreshTxStatus = useCallback(
+    async (tabId: string, sessionId: string) => {
+      try {
+        const status = await tauriTransport.invoke<TxStatus>('db_transaction_status', {
+          sessionId,
+        });
+        patchTab(tabId, { txStatus: status });
+      } catch {
+        // A status read failing is not worth surfacing on its own; the
+        // next real operation will report the underlying problem.
+      }
+    },
+    [patchTab],
+  );
+
+  const handleSetTxMode = async (mode: TxMode, config: TxConfig) => {
+    const tabId = activeTabId;
+    const tab = activeTab;
+    if (!tab.sessionId) return;
+    patchTab(tabId, { busy: true });
+    try {
+      const status = await tauriTransport.invoke<TxStatus>('db_set_transaction_mode', {
+        sessionId: tab.sessionId,
+        mode,
+        config,
+      });
+      patchTab(tabId, { txStatus: status, error: null });
+    } catch (err) {
+      patchTab(tabId, { error: String(err) });
+    } finally {
+      patchTab(tabId, { busy: false });
+    }
+  };
+
+  const finishTx = async (command: 'db_commit' | 'db_rollback') => {
+    const tabId = activeTabId;
+    const tab = activeTab;
+    if (!tab.sessionId) return;
+    patchTab(tabId, { busy: true });
+    try {
+      const status = await tauriTransport.invoke<TxStatus>(command, {
+        sessionId: tab.sessionId,
+      });
+      patchTab(tabId, { txStatus: status, error: null });
+      // Committed or discarded work changes what the schema looks like,
+      // since Firebird makes DDL transactional too.
+      void refreshSchema(tabId, tab.sessionId);
+    } catch (err) {
+      patchTab(tabId, { error: String(err) });
+    } finally {
+      patchTab(tabId, { busy: false });
+    }
+  };
+
+  /// Asks before throwing away uncommitted work.
+  ///
+  /// Returns false when the user backs out. An open transaction with
+  /// nothing in it is not worth interrupting anyone over, which is what
+  /// `hasUncommittedWork` encodes.
+  const confirmDiscardTx = (tab: TabState, what: string): boolean => {
+    if (!hasUncommittedWork(tab.txStatus)) return true;
+    const count = tab.txStatus?.pendingStatements ?? 0;
+    const statements = count === 1 ? '1 statement' : `${count} statements`;
+    return window.confirm(
+      `${what} will roll back ${statements} that have not been committed. Continue?`,
+    );
+  };
+
   const handleDisconnect = async () => {
     const tabId = activeTabId;
     const tab = activeTab;
     if (!tab.sessionId) return;
+    if (!confirmDiscardTx(tab, 'Disconnecting')) return;
     patchTab(tabId, { error: null, busy: true });
     try {
       await tauriTransport.invoke<null>('db_close', { sessionId: tab.sessionId });
@@ -1657,6 +1696,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
         lastPingAt: null,
         connectedAt: null,
         engineVersion: null,
+        txStatus: null,
       });
     } catch (err) {
       patchTab(tabId, { error: String(err) });
@@ -1667,10 +1707,9 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
 
   const handleTabClose = (id: string) => {
     const tab = tabs.find((t) => t.id === id);
+    if (tab && !confirmDiscardTx(tab, 'Closing this tab')) return;
     if (tab?.sessionId) {
-      void tauriTransport
-        .invoke<null>('db_close', { sessionId: tab.sessionId })
-        .catch(() => {});
+      void tauriTransport.invoke<null>('db_close', { sessionId: tab.sessionId }).catch(() => {});
     }
     closeTab(id);
   };
@@ -1728,8 +1767,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
       openSearchPalette: () => handlersRef.current.setSearchOpen(true),
       openCommandPalette: () => handlersRef.current.setPaletteOpen(true),
       newTab: () => handlersRef.current.newTab(),
-      closeActiveTab: () =>
-        handlersRef.current.handleTabClose(handlersRef.current.activeTabId),
+      closeActiveTab: () => handlersRef.current.handleTabClose(handlersRef.current.activeTabId),
       canSaveProfile: () => {
         const t = handlersRef.current.activeTab;
         return t.sessionId === null && t.profileName.trim() !== '' && !t.busy;
@@ -2090,10 +2128,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
           backLabel="Back to connections"
         />
       ) : showSettings && activeTab.sessionId === null ? (
-        <SettingsPage
-          onClose={() => setShowSettings(false)}
-          backLabel="Back to connections"
-        />
+        <SettingsPage onClose={() => setShowSettings(false)} backLabel="Back to connections" />
       ) : activeTab.sessionId === null ? (
         <ConnectView
           tab={activeTab}
@@ -2142,6 +2177,9 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
           onBookmarksChange={(next) => patchTab(activeTabId, { bookmarks: next })}
           onExecute={handleExecute}
           onDisconnect={handleDisconnect}
+          onSetTxMode={(mode, config) => void handleSetTxMode(mode, config)}
+          onCommitTx={() => void finishTx('db_commit')}
+          onRollbackTx={() => void finishTx('db_rollback')}
           onOpenStats={openStats}
           stats={stats}
           onRefreshStats={() => void refreshStats(activeTab.sessionId ?? '')}
@@ -2169,7 +2207,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
           onBrowseTable={handleBrowseTable}
         />
       )}
-<StatusBar
+      <StatusBar
         sessionId={activeTab.sessionId}
         health={activeTab.health}
         user={activeTab.form.user}
@@ -2185,10 +2223,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
         onClose={() => setPaletteOpen(false)}
         commands={commands}
       />
-      <ShortcutsCheatSheet
-        open={shortcutsOpen}
-        onClose={() => setShortcutsOpen(false)}
-      />
+      <ShortcutsCheatSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
       <SearchPalette
         open={searchOpen}
         schema={activeTab.schema}
@@ -2207,7 +2242,9 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
         profileLabel={
           (activeTab.selectedProfileId
             ? profiles.find((p) => p.id === activeTab.selectedProfileId)?.name
-            : null) ?? activeTab.profileName ?? 'No profile'
+            : null) ??
+          activeTab.profileName ??
+          'No profile'
         }
         entries={historyEntries}
         loading={historyLoading}
@@ -2245,11 +2282,7 @@ const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
           setActive(id);
         }}
       />
-      <ConfirmationModal
-        request={confirmHead}
-        onConfirm={onConfirmHead}
-        onCancel={onCancelHead}
-      />
+      <ConfirmationModal request={confirmHead} onConfirm={onConfirmHead} onCancel={onCancelHead} />
     </div>
   );
 }
@@ -2349,6 +2382,9 @@ interface SessionViewProps {
   onBookmarksChange: (next: Record<string, number>) => void;
   onExecute: () => void;
   onDisconnect: () => void;
+  onSetTxMode: (mode: TxMode, config: TxConfig) => void;
+  onCommitTx: () => void;
+  onRollbackTx: () => void;
   onRefreshSchema: () => void;
   onSchemaAction: (action: SchemaAction) => void;
   onPluginDdl: (ddl: SchemaDdl) => void;
@@ -2367,9 +2403,10 @@ interface SessionViewProps {
   onColumnWidthsChange: (next: Record<string, number>) => void;
   onFetchBlob: (blobId: string) => Promise<string>;
   onCountAllRows: (args: { table: string; predicate: string | null }) => Promise<number>;
-  onFetchScopedRows: (args: { table: string; predicate: string | null }) => Promise<
-    { cells: ColumnValue[] }[]
-  >;
+  onFetchScopedRows: (args: {
+    table: string;
+    predicate: string | null;
+  }) => Promise<{ cells: ColumnValue[] }[]>;
   onReconnect: () => void;
   plugins: ActivePlugin[];
   onShowDdl: (kind: DdlSourceKind, name: string) => void;
@@ -2436,6 +2473,9 @@ function SessionView({
   onBookmarksChange,
   onExecute,
   onDisconnect,
+  onSetTxMode,
+  onCommitTx,
+  onRollbackTx,
   onRefreshSchema,
   onSchemaAction,
   onPluginDdl,
@@ -2553,11 +2593,7 @@ function SessionView({
       {showAbout ? (
         <AboutPage version={appVersion} onClose={onCloseAbout} backLabel="Back to session" />
       ) : showPlugins ? (
-        <PluginsPage
-          plugins={plugins}
-          onClose={onClosePlugins}
-          backLabel="Back to session"
-        />
+        <PluginsPage plugins={plugins} onClose={onClosePlugins} backLabel="Back to session" />
       ) : showSettings ? (
         <SettingsPage onClose={onCloseSettings} backLabel="Back to session" />
       ) : showSqlEditor ? (
@@ -2595,6 +2631,15 @@ function SessionView({
       ) : (
         <main className="flex flex-1 flex-col gap-6 overflow-y-auto px-6 pb-6 pt-0">
           <QueryPanel
+            transactionBar={
+              <TransactionBar
+                status={tab.txStatus}
+                busy={tab.busy}
+                onSetMode={onSetTxMode}
+                onCommit={onCommitTx}
+                onRollback={onRollbackTx}
+              />
+            }
             sessionId={tab.sessionId}
             sql={tab.sql}
             busy={tab.busy}
@@ -2611,9 +2656,7 @@ function SessionView({
             onBookmarksChange={onBookmarksChange}
             onOpenStats={onOpenStats}
             onReconnect={onReconnect}
-            onEditorFocus={() =>
-              emitEditorFocused({ tabId: tab.id, focusedAt: Date.now() })
-            }
+            onEditorFocus={() => emitEditorFocused({ tabId: tab.id, focusedAt: Date.now() })}
             onEditorSelectionChange={(sel) =>
               emitEditorSelectionChanged({
                 tabId: tab.id,
@@ -2643,7 +2686,7 @@ function SessionView({
             }
             const focusedTable =
               tab.focusedObjectName && tab.schema
-                ? tab.schema.tables.find((t) => t.name === tab.focusedObjectName) ?? null
+                ? (tab.schema.tables.find((t) => t.name === tab.focusedObjectName) ?? null)
                 : null;
             if (focusedTable && tab.results && tab.results.length > 0) {
               return (
