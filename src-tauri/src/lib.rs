@@ -120,6 +120,12 @@ pub fn run() {
                                 )
                             }
                         };
+                        // Before activating anything: a store's epoch
+                        // deadline only means something once something
+                        // is advancing the epoch.
+                        if let Some(state) = handle.try_state::<PluginsState>() {
+                            state.start_epoch_ticker(&host);
+                        }
                         let active = plugin_bootstrap(
                             &host,
                             &host_version,

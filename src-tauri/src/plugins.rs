@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use plamenix_plugin_host::{
-    ActivationOutcome, HostState, InstanceRegistry, LogLevel, Permission, PluginError, PluginHost,
-    RecordedLog, SidebarPanel, activate_into_registry, load,
+    ActivationOutcome, EpochTicker, HostState, InstanceRegistry, LogLevel, Permission, PluginError,
+    PluginHost, RecordedLog, SidebarPanel, activate_into_registry, load,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -105,6 +105,14 @@ pub struct PluginsState {
     /// — for the process lifetime, in Tauri's managed state — is what
     /// makes events, commands and supervision possible at all.
     instances: Arc<InstanceRegistry>,
+    /// Keeps wasmtime's epoch advancing for the process lifetime.
+    ///
+    /// Every plugin store is created with an epoch deadline, but a
+    /// deadline is measured against a clock that something has to
+    /// advance. Without this the deadlines were inert and a plugin that
+    /// looped ran until the process died. Held here so it lives as long
+    /// as the instances it polices — dropping it stops the ticking.
+    ticker: Mutex<Option<EpochTicker>>,
 }
 
 impl PluginsState {
@@ -113,6 +121,20 @@ impl PluginsState {
             plugins: Mutex::new(Vec::new()),
             grants,
             instances: Arc::new(InstanceRegistry::new()),
+            ticker: Mutex::new(None),
+        }
+    }
+
+    /// Starts the epoch ticker, if one is not already running.
+    ///
+    /// Called once from the boot task, which runs inside Tauri's Tokio
+    /// runtime — `EpochTicker::spawn` requires one.
+    pub fn start_epoch_ticker(&self, host: &PluginHost) {
+        if let Ok(mut guard) = self.ticker.lock()
+            && guard.is_none()
+        {
+            *guard = Some(EpochTicker::spawn(host.engine().clone()));
+            tracing::info!("epoch ticker started; plugin CPU deadlines are live");
         }
     }
 
