@@ -9,7 +9,7 @@ use std::time::Instant;
 
 use plamenix_db::{
     ColumnValue, ConnectMode, ConnectionConfig, CryptState, DbDriver, QueryResult, Schema,
-    SessionId, StatementOutcome, inject_row_limit, is_select_like, split_statements,
+    SessionId, StatementOutcome, accepts_row_limit, inject_row_limit, split_statements,
 };
 use plamenix_types::{
     DatabaseAlias, DatabaseStats, HistoryEntry, ListAliasesResult, TestConnectionResult,
@@ -129,7 +129,10 @@ pub async fn db_execute(
     let mut outcomes = Vec::with_capacity(stmts.len());
     for sql in stmts {
         let started = Instant::now();
-        let exec_sql = if is_select_like(&sql) {
+        // `accepts_row_limit`, not "does this return rows": Firebird's
+        // ROWS clause belongs to the SELECT grammar, so appending it to
+        // an EXECUTE BLOCK or EXECUTE PROCEDURE is a syntax error.
+        let exec_sql = if accepts_row_limit(&sql) {
             inject_row_limit(&sql, ROW_LIMIT)
         } else {
             sql.clone()
