@@ -1,8 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   CommandPalette,
+  ConfirmationModal,
   ConnectionScreen,
-  DdlViewerModal,
   ErrorBanner,
   HistoryPanel,
   MultiResultView,
@@ -10,16 +10,16 @@ import {
   NewObjectModal,
   ObjectListPage,
   PluginPanelModal,
-  PluginsSidebar,
   ToastViewport,
   notifyMutations,
   QueryPanel,
   SchemaBrowser,
   SchemaEditorModal,
-  SettingsButton,
   SettingsPage,
   SearchPalette,
   TableObjectView,
+  RoutineObjectView,
+  SqlEditorPage,
   StatsDashboard,
   StatusBar,
   TabStrip,
@@ -30,8 +30,33 @@ import {
   resolveHistoryLimit,
   ShortcutsCheatSheet,
   getModKeyLabel,
-  isTypingTarget,
+  registerBuiltinDefaultKeybindings,
+  registerBuiltinPluginSettings,
+  connectionOpeningChain,
+  editorSavingChain,
+  installDestructiveDropInterceptor,
+  setConfirmationProvider,
+  type ConfirmationRequest,
+  type PendingConfirmation,
+  emitExportCompleted,
+  emitExportFailed,
+  emitExportStarted,
+  emitSchemaActionApplied,
+  emitEditorFocused,
+  emitEditorSelectionChanged,
+  exportStartingChain,
+  newExportId,
+  queryExecutingChain,
+  schemaActionApplyingChain,
+  useGlobalKeybindings,
   useConnectionPrefs,
+  useEmitConnectionEvents,
+  useEmitEditorEvents,
+  useEmitLifecycleEvents,
+  useEmitQueryEvents,
+  useEmitSchemaEvents,
+  useEmitSettingsThemeEvents,
+  useEmitTabEvents,
   useResolvedThemeMode,
   useHealthProbe,
   useRecentQueries,
@@ -52,6 +77,12 @@ import {
   type TableExportPart,
   type TableInfo,
   type ConnectionForm,
+  AboutPage,
+  AppMenu,
+  buildBuiltinActivePlugins,
+  decodeHex,
+  HomeButton,
+  PluginsPage,
   type CryptState,
   type Profile,
   type ListAliasesResult,
@@ -59,10 +90,17 @@ import {
   type StatementOutcome,
   type TabState,
   type SchemaAction,
+  type SchemaDdl,
   type TestConnectionResult,
 } from '@plamenix/ui';
 import {
+  ChartLine as ChartLineIcon,
+  FileTerminal as SqlEditorIcon,
   History,
+  Info as InfoIcon,
+  LogOut as LogOutIcon,
+  Plug as PluginsIcon,
+  Settings as SettingsIcon,
   Keyboard,
   LogOut,
   Moon,
@@ -77,6 +115,7 @@ import {
 } from 'lucide-react';
 import { tauriTransport } from '@/transport/tauri';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 interface ConnectResponse {
   sessionId: string;
@@ -101,6 +140,55 @@ function currentHistoryLimit(): number | null {
 function recentKeyOf(form: ConnectionForm, profileName: string): string {
   const trimmed = profileName.trim();
   return trimmed.length > 0 ? trimmed : deriveTitle(form);
+}
+
+/** Builds a fallback DDL note shown when Firebird returns NULL for an
+ *  object's `*_SOURCE` column. Common cause: the routine was compiled
+ *  into BLR (binary form) without preserving its text — the legacy
+ *  `employee.fdb` `GIVE_RAISE` procedure is the canonical example. */
+function synthesizeMissingSourceNote(
+  kind: DdlSourceKind,
+  name: string,
+  schema: Schema | null,
+): string {
+  const banner = [
+    `-- ${kind.toUpperCase()} ${name}`,
+    `--`,
+    `-- Source text is not stored in this database.`,
+    `-- RDB$${kind === 'view' ? 'RELATIONS.RDB$VIEW' : kind === 'trigger' ? 'TRIGGERS.RDB$TRIGGER' : 'PROCEDURES.RDB$PROCEDURE'}_SOURCE is NULL,`,
+    `-- so the body was compiled into BLR (binary form) without`,
+    `-- preserving the original text. This happens with older`,
+    `-- Firebird samples (employee.fdb), or backups restored from`,
+    `-- BLR-only \`.fbk\` files where source was stripped at backup.`,
+    `--`,
+  ];
+  if (kind === 'procedure') {
+    const proc = schema?.procedures?.find((p) => p.name === name);
+    if (proc) {
+      banner.push(
+        `-- Signature: ${proc.inputCount} input(s), ${proc.outputCount} output(s)`,
+        `--`,
+        `-- Invoke with:`,
+        proc.outputCount > 0
+          ? `--   SELECT * FROM "${name}"(<inputs>);`
+          : `--   EXECUTE PROCEDURE "${name}"(<inputs>);`,
+      );
+    }
+  } else if (kind === 'trigger') {
+    const trig = schema?.triggers?.find((t) => t.name === name);
+    if (trig) {
+      banner.push(
+        `-- Fires on: ${trig.relation ?? '<database>'}`,
+        `-- Active: ${trig.active ? 'YES' : 'NO'}`,
+      );
+    }
+  } else if (kind === 'view') {
+    const view = schema?.tables.find((t) => t.name === name && t.kind === 'view');
+    if (view) {
+      banner.push(`-- Columns: ${view.columns.length}`);
+    }
+  }
+  return banner.join('\n');
 }
 
 function recordExec(
@@ -153,7 +241,60 @@ function formatRelative(at: number, _tick: number): string {
   return `${hours}h ago`;
 }
 
+// I6 event-bus identity. Keep in sync with package.json version on
+// release-prep (no live import yet — vite JSON imports work but
+// require the workspace to expose package.json to the bundler).
+const HOST_VERSION = '1.0.0-beta.0';
+const EDITION = 'desktop' as const;
+
 export function App() {
+  // I6.3-I6.6 + I6.8 + I6.10 + I6.11 — mount the seven event-bridge
+  // hooks once at the App root. Each hook subscribes to its source
+  // store + diffs/emits on every relevant transition. Order is
+  // arbitrary; hooks are independent.
+  useEmitLifecycleEvents({ edition: EDITION, hostVersion: HOST_VERSION });
+  useEmitTabEvents();
+  useEmitConnectionEvents();
+  useEmitQueryEvents();
+  useEmitSchemaEvents();
+  useEmitSettingsThemeEvents();
+  useEmitEditorEvents();
+
+  // I6.12 — confirmation queue + provider + built-in destructive-DROP
+  // interceptor. The queue keeps multiple in-flight confirmations
+  // ordered; each user action resolves exactly one request.
+  const [confirmQueue, setConfirmQueue] = useState<
+    Array<PendingConfirmation & { resolve: (v: boolean) => void }>
+  >([]);
+  useEffect(() => {
+    setConfirmationProvider(
+      (req: ConfirmationRequest) =>
+        new Promise<boolean>((resolve) => {
+          setConfirmQueue((q) => [...q, { ...req, resolve }]);
+        }),
+    );
+    const dropReg = installDestructiveDropInterceptor();
+    return () => {
+      setConfirmationProvider(null);
+      dropReg.dispose();
+    };
+  }, []);
+  const confirmHead = confirmQueue[0] ?? null;
+  const onConfirmHead = useCallback(() => {
+    setConfirmQueue((q) => {
+      const [head, ...rest] = q;
+      head?.resolve(true);
+      return rest;
+    });
+  }, []);
+  const onCancelHead = useCallback(() => {
+    setConfirmQueue((q) => {
+      const [head, ...rest] = q;
+      head?.resolve(false);
+      return rest;
+    });
+  }, []);
+
   const tabs = useTabsStore((s) => s.tabs);
   const activeTabId = useTabsStore((s) => s.activeTabId);
   const newTab = useTabsStore((s) => s.newTab);
@@ -178,28 +319,29 @@ export function App() {
   const [statsFetchedAt, setStatsFetchedAt] = useState<number | null>(null);
   const [statsTick, setStatsTick] = useState(0);
 
-  const [ddlViewer, setDdlViewer] = useState<{
-    kind: DdlSourceKind;
-    name: string;
-    source: string | null;
-    loading: boolean;
-    error: string | null;
-  } | null>(null);
-
-  const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
+const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
   const [openPluginPanel, setOpenPluginPanel] = useState<{
     plugin: ActivePlugin;
     panel: SidebarPanelInfo;
   } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showPlugins, setShowPlugins] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
+  const [showSqlEditor, setShowSqlEditor] = useState(false);
+  const APP_VERSION = '1.0.0-beta.0';
 
   useEffect(() => {
     const fetchPlugins = async () => {
+      // Built-ins are synchronous + always available, so they surface
+      // even if the Rust-side plugin host hasn't booted yet (e.g.
+      // bootstrap still running, or every wasm plugin failed to load).
+      const builtins = buildBuiltinActivePlugins();
       try {
         const list = await tauriTransport.invoke<ActivePlugin[]>('plugin_list_active');
-        setPlugins(list);
+        setPlugins([...builtins, ...list]);
       } catch {
-        // Plugins are best-effort; never block the shell on a load failure.
+        // Wasm-side fetch is best-effort; built-ins still surface.
+        setPlugins(builtins);
       }
     };
     // First fetch at mount in case the bootstrap already finished (e.g.
@@ -207,6 +349,13 @@ export function App() {
     // catches the cold-start race where the main window mounts before
     // the plugin bootstrap completes.
     void fetchPlugins();
+    // Built-ins land asynchronously — each lives behind a `useEffect`
+    // in its consumer component (ResultTable, SchemaBrowser, etc).
+    // A short deferred re-fetch picks them up once children mount,
+    // without needing to subscribe to every registry channel.
+    const builtinSettleTimeout = window.setTimeout(() => {
+      void fetchPlugins();
+    }, 800);
     let unlisten: (() => void) | null = null;
     void import('@tauri-apps/api/event').then(({ listen }) =>
       listen('boot:ready', () => {
@@ -216,6 +365,7 @@ export function App() {
       }),
     );
     return () => {
+      window.clearTimeout(builtinSettleTimeout);
       if (unlisten) unlisten();
     };
   }, []);
@@ -269,6 +419,56 @@ export function App() {
     [],
   );
 
+  const computeRowCounts = useCallback(async () => {
+    const tab = activeTab;
+    if (!tab.sessionId || !tab.schema) return [];
+    const out: { name: string; kind: 'table' | 'view'; count: number | null; error?: string }[] = [];
+    for (const t of tab.schema.tables) {
+      const ident = `"${t.name.replace(/"/g, '""')}"`;
+      try {
+        const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+          request: {
+            sessionId: tab.sessionId,
+            sql: `SELECT COUNT(*) FROM ${ident}`,
+            profileId: null,
+            historyLimit: 0,
+          },
+        });
+        const first = outcomes[0];
+        if (!first || first.status === 'err' || !('Rows' in first.result)) {
+          out.push({
+            name: t.name,
+            kind: t.kind === 'view' ? 'view' : 'table',
+            count: null,
+            error:
+              first?.status === 'err'
+                ? first.error
+                : 'count produced no row',
+          });
+          continue;
+        }
+        const cell = first.result.Rows.rows[0]?.cells[0];
+        const count =
+          cell?.type === 'integer' && cell.value !== null
+            ? Number(cell.value)
+            : null;
+        out.push({
+          name: t.name,
+          kind: t.kind === 'view' ? 'view' : 'table',
+          count,
+        });
+      } catch (err) {
+        out.push({
+          name: t.name,
+          kind: t.kind === 'view' ? 'view' : 'table',
+          count: null,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    return out;
+  }, [activeTab]);
+
   const openStats = useCallback(() => {
     if (!activeTab.sessionId) return;
     setStatsOpen(true);
@@ -284,8 +484,49 @@ export function App() {
   const handleShowDdl = useCallback(
     async (kind: DdlSourceKind, name: string) => {
       const tab = activeTab;
-      if (!tab.sessionId) return;
-      setDdlViewer({ kind, name, source: null, loading: true, error: null });
+      const tabId = tab.id;
+      // Surface the routine in the content pane (clearing any focused
+      // table) so the inspector replaces the bare query results without
+      // an intrusive modal overlay.
+      patchTab(tabId, {
+        focusedObjectName: null,
+        focusedRoutine: { kind, name, source: null, loading: true, error: null },
+      });
+      // Generators + domains have no `*_SOURCE` column in Firebird's
+      // metadata — synthesize a minimal `CREATE …` DDL from the
+      // already-cached schema instead of running a query.
+      if (kind === 'generator') {
+        const gen = tab.schema?.generators?.find((g) => g.name === name);
+        const source = gen
+          ? `CREATE SEQUENCE "${name}" START WITH ${gen.currentValue};`
+          : `-- Generator ${name} not found in the cached schema.`;
+        patchTab(tabId, {
+          focusedRoutine: { kind, name, source, loading: false, error: null },
+        });
+        return;
+      }
+      if (kind === 'domain') {
+        const dom = tab.schema?.domains?.find((d) => d.name === name);
+        const source = dom
+          ? `CREATE DOMAIN "${name}" AS ${dom.sqlType}${dom.nullable ? '' : ' NOT NULL'};`
+          : `-- Domain ${name} not found in the cached schema.`;
+        patchTab(tabId, {
+          focusedRoutine: { kind, name, source, loading: false, error: null },
+        });
+        return;
+      }
+      if (!tab.sessionId) {
+        patchTab(tabId, {
+          focusedRoutine: {
+            kind,
+            name,
+            source: null,
+            loading: false,
+            error: 'Connect to a database first to view DDL.',
+          },
+        });
+        return;
+      }
       try {
         const sql = sourceQuery(kind, name);
         const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
@@ -304,20 +545,46 @@ export function App() {
         }
         const cell = first.result.Rows.rows[0]?.cells[0];
         let source = '';
-        if (cell?.type === 'text') source = cell.value;
-        else if (cell?.type === 'null') source = '';
-        setDdlViewer({ kind, name, source, loading: false, error: null });
+        if (cell?.type === 'text') {
+          source = cell.value;
+        } else if (cell?.type === 'null') {
+          source = '';
+        } else if (cell?.type === 'blob') {
+          // Firebird stores routine/view bodies in `BLOB SUB_TYPE TEXT`
+          // columns. The driver inlines short text blobs as 'text' but
+          // larger ones (e.g. multi-page procedure bodies) arrive as
+          // blob refs — fetch the bytes and decode UTF-8.
+          const hex = await tauriTransport.invoke<string>('db_fetch_blob', {
+            sessionId: tab.sessionId,
+            blobId: cell.value.id,
+          });
+          source = new TextDecoder('utf-8', { fatal: false }).decode(decodeHex(hex));
+        }
+        // Some procedures / triggers / views ship with NULL source
+        // (RDB$PROCEDURE_SOURCE etc. is `null`) — the body was compiled
+        // into BLR without preserving its text. Surface that honestly
+        // and give the user something they can run instead of an empty
+        // pane. Classic offender: the Firebird `employee.fdb`
+        // `GIVE_RAISE` procedure restored from an older `.fbk`.
+        if (source.trim().length === 0) {
+          source = synthesizeMissingSourceNote(kind, name, tab.schema);
+        }
+        patchTab(tabId, {
+          focusedRoutine: { kind, name, source, loading: false, error: null },
+        });
       } catch (err) {
-        setDdlViewer({
-          kind,
-          name,
-          source: null,
-          loading: false,
-          error: err instanceof Error ? err.message : String(err),
+        patchTab(tabId, {
+          focusedRoutine: {
+            kind,
+            name,
+            source: null,
+            loading: false,
+            error: err instanceof Error ? err.message : String(err),
+          },
         });
       }
     },
-    [activeTab],
+    [activeTab, patchTab],
   );
 
   const openHistory = useCallback(async () => {
@@ -429,6 +696,15 @@ export function App() {
     return typeof result === 'string' ? result : null;
   }, []);
 
+  const handleBrowseDatabase = useCallback(async (): Promise<string | null> => {
+    const result = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Firebird database', extensions: ['fdb', 'gdb'] }],
+    });
+    return typeof result === 'string' ? result : null;
+  }, []);
+
   const handleBrowseFbclientDir = useCallback(async () => {
     const picked = await openDialog({ multiple: false, directory: true });
     if (typeof picked !== 'string') return null;
@@ -475,8 +751,14 @@ export function App() {
   }, [refreshProfiles]);
 
   const updateField = <K extends keyof ConnectionForm>(key: K, value: ConnectionForm[K]) => {
+    // Pull the freshest tab.form from the store rather than spreading
+    // the closure-captured `activeTab.form`. Multiple back-to-back
+    // updateField calls inside one click handler would otherwise read
+    // the SAME stale closure value and clobber each other's writes.
+    const fresh = useTabsStore.getState().tabs.find((t) => t.id === activeTabId);
+    if (!fresh) return;
     patchTab(activeTabId, {
-      form: { ...activeTab.form, [key]: value },
+      form: { ...fresh.form, [key]: value },
       testResult: null,
     });
   };
@@ -503,6 +785,7 @@ export function App() {
         encryptionRequired: profile.encryptionRequired,
         fbclientPath: profile.fbclientPath ?? '',
         charset: profile.charset ?? 'UTF8',
+        embedded: profile.embedded ?? false,
       },
     });
   };
@@ -526,6 +809,7 @@ export function App() {
         color: tab.profileColor,
         fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
         charset: tab.form.charset === '' ? null : tab.form.charset,
+        embedded: tab.form.embedded,
       };
       const saved = await tauriTransport.invoke<Profile>('profile_save', { draft });
       await refreshProfiles();
@@ -649,6 +933,21 @@ export function App() {
   const handleConnect = async () => {
     const tabId = activeTabId;
     const tab = activeTab;
+    const decision = await connectionOpeningChain.run({
+      tabId,
+      profileId: tab.selectedProfileId,
+      host: tab.form.host,
+      port: tab.form.port,
+      database: tab.form.database,
+      user: tab.form.user,
+      pureRust: tab.form.pureRust,
+      encryptionRequired: tab.form.encryptionRequired,
+      charset: tab.form.charset,
+    });
+    if (decision.action === 'cancel') {
+      patchTab(tabId, { error: decision.reason });
+      return;
+    }
     patchTab(tabId, { error: null, busy: true, cryptState: null });
     try {
       let response: ConnectResponse;
@@ -662,6 +961,7 @@ export function App() {
             encryptionRequired: tab.form.encryptionRequired,
             fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
             charset: tab.form.charset === '' ? null : tab.form.charset,
+            embedded: tab.form.embedded,
           },
         });
       } else {
@@ -677,6 +977,7 @@ export function App() {
             pureRust: tab.form.pureRust,
             fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
             charset: tab.form.charset === '' ? null : tab.form.charset,
+            embedded: tab.form.embedded,
           },
         });
       }
@@ -715,6 +1016,7 @@ export function App() {
             encryptionRequired: tab.form.encryptionRequired,
             fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
             charset: tab.form.charset === '' ? null : tab.form.charset,
+            embedded: tab.form.embedded,
           },
         });
       } else {
@@ -730,6 +1032,7 @@ export function App() {
             pureRust: tab.form.pureRust,
             fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
             charset: tab.form.charset === '' ? null : tab.form.charset,
+            embedded: tab.form.embedded,
           },
         });
       }
@@ -815,6 +1118,28 @@ export function App() {
     const tab = activeTab;
     if (!tab.sessionId) return;
     const sqlAtSend = tab.sql;
+    const editorDecision = await editorSavingChain.run({
+      tabId,
+      sessionId: tab.sessionId,
+      sql: sqlAtSend,
+    });
+    if (editorDecision.action === 'cancel') {
+      patchTab(tabId, { error: editorDecision.reason });
+      return;
+    }
+    const sqlAfterEditor =
+      editorDecision.action === 'replace' ? editorDecision.ctx.sql : sqlAtSend;
+    const queryDecision = await queryExecutingChain.run({
+      tabId,
+      sessionId: tab.sessionId,
+      sql: sqlAfterEditor,
+    });
+    if (queryDecision.action === 'cancel') {
+      patchTab(tabId, { error: queryDecision.reason });
+      return;
+    }
+    const sql =
+      queryDecision.action === 'replace' ? queryDecision.ctx.sql : sqlAfterEditor;
     const key = recentKeyOf(tab.form, tab.profileName);
     const startedAt = Date.now();
     patchTab(tabId, { error: null, busy: true });
@@ -822,17 +1147,22 @@ export function App() {
       const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
         request: {
           sessionId: tab.sessionId,
-          sql: sqlAtSend,
+          sql,
           profileId: tab.selectedProfileId,
           historyLimit: currentHistoryLimit(),
         },
       });
-      patchTab(tabId, { results: res, executedSql: sqlAtSend, focusedObjectName: null });
+      patchTab(tabId, {
+        results: res,
+        executedSql: sql,
+        focusedObjectName: null,
+        focusedRoutine: null,
+      });
       notifyMutations(res);
-      recordExec(key, sqlAtSend, startedAt, res, null);
+      recordExec(key, sql, startedAt, res, null);
     } catch (err) {
       patchTab(tabId, { error: String(err) });
-      recordExec(key, sqlAtSend, startedAt, null, String(err));
+      recordExec(key, sql, startedAt, null, String(err));
     } finally {
       patchTab(tabId, { busy: false });
     }
@@ -920,6 +1250,38 @@ export function App() {
 
   const handleStreamedExport: StreamedExportRunner = useCallback(
     async (req: StreamedExportRequest): Promise<StreamedExportResult> => {
+      const exportId = newExportId();
+      const startedAt = Date.now();
+      const scopeLabel =
+        req.scope.kind === 'statement'
+          ? req.scope.label ?? req.scope.table?.name ?? req.scope.sql.slice(0, 80)
+          : req.scope.tables.map((t) => t.name).join(', ');
+      const tables =
+        req.scope.kind === 'statement'
+          ? req.scope.table
+            ? [req.scope.table.name]
+            : []
+          : req.scope.tables.map((t) => t.name);
+      const exportDecision = await exportStartingChain.run({
+        tabId: activeTab.id,
+        sessionId: req.sessionId,
+        format: req.format,
+        scopeKind: req.scope.kind,
+        scopeLabel,
+        tables,
+      });
+      if (exportDecision.action === 'cancel') {
+        throw new Error(exportDecision.reason);
+      }
+      emitExportStarted({
+        exportId,
+        tabId: activeTab.id,
+        sessionId: req.sessionId,
+        format: req.format,
+        scopeKind: req.scope.kind,
+        scopeLabel,
+        startedAt,
+      });
       const { listen } = await import('@tauri-apps/api/event');
       const chunks: string[] = [];
       let resolveDone: (() => void) | null = null;
@@ -983,10 +1345,25 @@ export function App() {
           .toISOString()
           .replace(/[-:T]/g, '')
           .slice(0, 15);
+        emitExportCompleted({
+          exportId,
+          durationMs: Date.now() - startedAt,
+          byteSize: blob.size,
+          rowCount: null,
+          completedAt: Date.now(),
+        });
         return {
           blob,
           suggestedFilename: `plamenix-export-${stamp}.${req.format}`,
         };
+      } catch (err) {
+        emitExportFailed({
+          exportId,
+          durationMs: Date.now() - startedAt,
+          error: err instanceof Error ? err.message : String(err),
+          failedAt: Date.now(),
+        });
+        throw err;
       } finally {
         for (const u of unsubs) u();
       }
@@ -1114,11 +1491,12 @@ export function App() {
             historyLimit: currentHistoryLimit(),
           },
         });
-        // Show the data in the result panel without touching the editor
-        // buffer so any user-in-progress SQL stays intact. Also flag
-        // the tab as table-focused so the content pane swaps to the
-        // tabbed `TableObjectView` (Data / Schema / DDL).
-        patchTab(tabId, { results: res, executedSql: sql, focusedObjectName: name });
+        // Sync the editor buffer to the executed query so the SQL
+        // editor always reflects what produced the result pane —
+        // browsing a table, applying a filter, etc. The previous
+        // behaviour preserved user-in-progress SQL; users found it
+        // confusing because the editor and results pane drifted apart.
+        patchTab(tabId, { results: res, sql, executedSql: sql, focusedObjectName: name });
         recordExec(key, sql, startedAt, res, null);
       } catch (err) {
         patchTab(tabId, { error: String(err) });
@@ -1147,7 +1525,7 @@ export function App() {
             historyLimit: currentHistoryLimit(),
           },
         });
-        patchTab(tabId, { results: res, executedSql: sql });
+        patchTab(tabId, { results: res, sql, executedSql: sql });
         recordExec(key, sql, startedAt, res, null);
       } catch (err) {
         patchTab(tabId, { error: String(err) });
@@ -1159,15 +1537,20 @@ export function App() {
     [activeTab, activeTabId, patchTab],
   );
 
-  const handleSchemaAction = async (action: SchemaAction) => {
+  /** I5.5 — dispatch a fully-resolved `SchemaDdl` through the same
+   *  autoExecute / insert-into-editor / confirm-then-run pipeline the
+   *  built-in `SchemaAction` handler uses. Plugin schema_actions go
+   *  through this directly; built-in actions go through
+   *  `handleSchemaAction` → `schemaDdl(action)` → here. */
+  const dispatchDdl = async (ddl: SchemaDdl): Promise<boolean> => {
     const tabId = activeTabId;
     const tab = activeTab;
-    const ddl = schemaDdl(action);
     if (ddl.autoExecute) {
-      if (!tab.sessionId) return;
+      if (!tab.sessionId) return false;
       const key = recentKeyOf(tab.form, tab.profileName);
       const startedAt = Date.now();
       patchTab(tabId, { error: null, busy: true });
+      let executed = false;
       try {
         const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
           request: {
@@ -1180,23 +1563,25 @@ export function App() {
         notifyMutations(res);
         recordExec(key, ddl.sql, startedAt, res, null);
         void refreshSchema(tabId, tab.sessionId);
+        executed = true;
       } catch (err) {
         patchTab(tabId, { error: String(err) });
         recordExec(key, ddl.sql, startedAt, null, String(err));
       } finally {
         patchTab(tabId, { busy: false });
       }
-      return;
+      return executed;
     }
     if (!ddl.destructive) {
       patchTab(tabId, { sql: ddl.sql });
-      return;
+      return false;
     }
-    if (!window.confirm(ddl.confirmPrompt ?? 'Run destructive statement?')) return;
-    if (!tab.sessionId) return;
+    if (!window.confirm(ddl.confirmPrompt ?? 'Run destructive statement?')) return false;
+    if (!tab.sessionId) return false;
     const key = recentKeyOf(tab.form, tab.profileName);
     const startedAt = Date.now();
     patchTab(tabId, { error: null, busy: true, sql: ddl.sql });
+    let executed = false;
     try {
       const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
         request: {
@@ -1210,11 +1595,43 @@ export function App() {
       notifyMutations(res);
       recordExec(key, ddl.sql, startedAt, res, null);
       void refreshSchema(tabId, tab.sessionId);
+      executed = true;
     } catch (err) {
       patchTab(tabId, { error: String(err) });
       recordExec(key, ddl.sql, startedAt, null, String(err));
     } finally {
       patchTab(tabId, { busy: false });
+    }
+    return executed;
+  };
+
+  const handleSchemaAction = async (action: SchemaAction) => {
+    const ddl = schemaDdl(action);
+    if (activeTab.sessionId !== null) {
+      const decision = await schemaActionApplyingChain.run({
+        tabId: activeTabId,
+        sessionId: activeTab.sessionId,
+        kind: action.kind,
+        action: action.action,
+        targetName: action.target.name,
+        ddl: ddl.sql,
+      });
+      if (decision.action === 'cancel') {
+        patchTab(activeTabId, { error: decision.reason });
+        return;
+      }
+    }
+    const executed = await dispatchDdl(ddl);
+    if (executed) {
+      emitSchemaActionApplied({
+        tabId: activeTabId,
+        sessionId: activeTab.sessionId,
+        kind: action.kind,
+        action: action.action,
+        targetName: action.target.name,
+        ddl: ddl.sql,
+        appliedAt: Date.now(),
+      });
     }
   };
 
@@ -1298,52 +1715,123 @@ export function App() {
     activeTabId,
   };
 
+  // I5.1 — keybindings now live in the registry. The dispatcher
+  // hook walks `keybindings` contributions in priority order on
+  // every keydown; the built-in `@plamenix-builtin/default-keybindings`
+  // registration below carries the six shell defaults that used to
+  // live in a 40-line inline switch here. Third-party plugins can
+  // override individual combos by registering at lower priority.
+  useGlobalKeybindings();
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const h = handlersRef.current;
-      // `?` opens the cheat sheet only when the user isn't typing —
-      // questions marks inside SQL or text inputs must reach the
-      // editor / form, not the modal.
-      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        if (isTypingTarget(e.target)) return;
-        e.preventDefault();
-        h.setShortcutsOpen(true);
-        return;
-      }
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const key = e.key.toLowerCase();
-      if (e.shiftKey && key === 'f') {
-        e.preventDefault();
-        h.setSearchOpen(true);
-        return;
-      }
-      switch (key) {
-        case 'k':
-          e.preventDefault();
-          h.setPaletteOpen(true);
-          break;
-        case 't':
-          e.preventDefault();
-          h.newTab();
-          break;
-        case 'w':
-          e.preventDefault();
-          h.handleTabClose(h.activeTabId);
-          break;
-        case 's':
-          if (
-            h.activeTab.sessionId === null &&
-            h.activeTab.profileName.trim() !== '' &&
-            !h.activeTab.busy
-          ) {
-            e.preventDefault();
-            void h.handleSaveProfile();
-          }
-          break;
+    return registerBuiltinDefaultKeybindings({
+      openCheatSheet: () => handlersRef.current.setShortcutsOpen(true),
+      openSearchPalette: () => handlersRef.current.setSearchOpen(true),
+      openCommandPalette: () => handlersRef.current.setPaletteOpen(true),
+      newTab: () => handlersRef.current.newTab(),
+      closeActiveTab: () =>
+        handlersRef.current.handleTabClose(handlersRef.current.activeTabId),
+      canSaveProfile: () => {
+        const t = handlersRef.current.activeTab;
+        return t.sessionId === null && t.profileName.trim() !== '' && !t.busy;
+      },
+      saveActiveProfile: () => void handlersRef.current.handleSaveProfile(),
+    });
+  }, []);
+  // Per-plugin settings — 6 built-ins ship a runtime-configurable
+  // panel that PluginsPage renders inline in the matching card.
+  useEffect(() => registerBuiltinPluginSettings(), []);
+  // After a webview reload (context-menu Reload, devtools refresh)
+  // React state is wiped but the Rust-side wasmtime session may still
+  // be alive. We persist sessionIds to **sessionStorage** (not
+  // localStorage) so reload restores them but a full app restart —
+  // which destroys the WebView + the Rust process together — wipes
+  // them. This effect pings each restored sessionId: alive ones get
+  // re-attached + their schema refetched; dead ones get cleared so
+  // the user lands on ConnectView instead of a phantom-connected tab.
+  useEffect(() => {
+    const verify = async () => {
+      for (const tab of useTabsStore.getState().tabs) {
+        const stashed = readStashedSession(tab.id);
+        if (!stashed) continue;
+        try {
+          const version = await tauriTransport.invoke<string>('db_ping', {
+            sessionId: stashed,
+          });
+          patchTab(tab.id, {
+            sessionId: stashed,
+            engineVersion: version,
+            health: 'healthy',
+            lastPingAt: Date.now(),
+          });
+          void refreshSchema(tab.id, stashed);
+        } catch {
+          clearStashedSession(tab.id);
+          patchTab(tab.id, {
+            sessionId: null,
+            health: 'dead',
+            executedSql: null,
+            results: null,
+            schema: null,
+            cryptState: null,
+          });
+        }
       }
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    void verify();
+  }, []);
+  // Mirror every live tab.sessionId into sessionStorage so the verify
+  // effect above has something to find on reload.
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (tab.sessionId) writeStashedSession(tab.id, tab.sessionId);
+      else clearStashedSession(tab.id);
+    }
+  }, [tabs]);
+  // Any session-navigation (browse a table, run a query, surface DDL,
+  // etc.) makes the Plugins / Settings / About overlays stale — auto-
+  // close them so the user lands on the new content directly without
+  // an extra "Back to session" click.
+  useEffect(() => {
+    if (
+      activeTab.focusedObjectName !== null ||
+      activeTab.focusedRoutine !== null ||
+      activeTab.results !== null
+    ) {
+      setShowPlugins(false);
+      setShowSettings(false);
+      setShowAbout(false);
+    }
+  }, [activeTab.focusedObjectName, activeTab.focusedRoutine, activeTab.results]);
+
+  // Surfacing a focused table / routine should also collapse the
+  // full-screen SQL Editor page so the user lands on the new content,
+  // but a bare result-set change must NOT (running a query from inside
+  // the editor page is the whole point — results render below in-page).
+  useEffect(() => {
+    if (activeTab.focusedObjectName !== null || activeTab.focusedRoutine !== null) {
+      setShowSqlEditor(false);
+    }
+  }, [activeTab.focusedObjectName, activeTab.focusedRoutine]);
+  // Tauri's WKWebView blocks external navigation by default. Route every
+  // anchor click whose href looks external through the opener plugin so
+  // it lands in the user's system default browser. Capture phase so the
+  // listener runs before React's bubble-phase handlers and before any
+  // ancestor's `onClick` can preventDefault.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement | null)?.closest('a');
+      if (!target) return;
+      const href = target.getAttribute('href') ?? '';
+      if (!/^https?:\/\//i.test(href) && !/^mailto:/i.test(href)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openUrl(href).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('openUrl failed', err);
+      });
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
   }, []);
 
   const mod = getModKeyLabel();
@@ -1500,11 +1988,108 @@ export function App() {
             accentByTabId={accentByTabId}
           />
         </div>
-        <div className="flex shrink-0 items-stretch border-b border-edge">
-          <SettingsButton onOpenDetailed={() => setShowSettings(true)} />
+        <div className="flex shrink-0 items-stretch">
+          {activeTab.sessionId !== null && (
+            <HomeButton
+              active={
+                !showSettings &&
+                !showAbout &&
+                !showPlugins &&
+                !showSqlEditor &&
+                activeTab.focusedObjectName === null &&
+                activeTab.focusedRoutine === null &&
+                activeTab.results === null
+              }
+              onClick={() => {
+                setShowSettings(false);
+                setShowAbout(false);
+                setShowPlugins(false);
+                setShowSqlEditor(false);
+                patchTab(activeTabId, {
+                  focusedObjectName: null,
+                  focusedRoutine: null,
+                  results: null,
+                  executedSql: null,
+                });
+              }}
+            />
+          )}
+          <AppMenu
+            items={[
+              {
+                id: 'plugins',
+                icon: PluginsIcon,
+                label: 'Plugins',
+                badge: String(plugins.length),
+                onClick: () => {
+                  setShowSettings(false);
+                  setShowAbout(false);
+                  setShowPlugins(true);
+                },
+              },
+              {
+                id: 'settings',
+                icon: SettingsIcon,
+                label: 'Settings',
+                onClick: () => {
+                  setShowPlugins(false);
+                  setShowAbout(false);
+                  setShowSettings(true);
+                },
+              },
+              {
+                id: 'about',
+                icon: InfoIcon,
+                label: 'About',
+                onClick: () => {
+                  setShowPlugins(false);
+                  setShowSettings(false);
+                  setShowAbout(true);
+                },
+              },
+              ...(activeTab.sessionId !== null
+                ? [
+                    {
+                      id: 'stats',
+                      icon: ChartLineIcon,
+                      label: 'Statistics',
+                      dividerAbove: true,
+                      onClick: () => {
+                        setShowPlugins(false);
+                        setShowSettings(false);
+                        setShowAbout(false);
+                        openStats();
+                      },
+                    },
+                    {
+                      id: 'disconnect',
+                      icon: LogOutIcon,
+                      label: 'Disconnect',
+                      danger: true,
+                      dividerAbove: true,
+                      onClick: () => {
+                        void handleDisconnect();
+                      },
+                    },
+                  ]
+                : []),
+            ]}
+          />
         </div>
       </div>
-      {showSettings && activeTab.sessionId === null ? (
+      {showAbout && activeTab.sessionId === null ? (
+        <AboutPage
+          version={APP_VERSION}
+          onClose={() => setShowAbout(false)}
+          backLabel="Back to connections"
+        />
+      ) : showPlugins && activeTab.sessionId === null ? (
+        <PluginsPage
+          plugins={plugins}
+          onClose={() => setShowPlugins(false)}
+          backLabel="Back to connections"
+        />
+      ) : showSettings && activeTab.sessionId === null ? (
         <SettingsPage
           onClose={() => setShowSettings(false)}
           backLabel="Back to connections"
@@ -1526,6 +2111,7 @@ export function App() {
           aliasesLoading={aliasesLoading}
           onListAliases={handleListAliases}
           onBrowseFbclient={handleBrowseFbclient}
+          onBrowseDatabase={handleBrowseDatabase}
           onBrowseFbclientDir={handleBrowseFbclientDir}
           onDownloadFbclient={handleDownloadFbclient}
           fbclientReleases={fbclientReleases}
@@ -1535,13 +2121,31 @@ export function App() {
           tab={activeTab}
           showSettings={showSettings}
           onCloseSettings={() => setShowSettings(false)}
+          showPlugins={showPlugins}
+          onClosePlugins={() => setShowPlugins(false)}
+          showAbout={showAbout}
+          onCloseAbout={() => setShowAbout(false)}
+          showSqlEditor={showSqlEditor}
+          onOpenSqlEditor={() => {
+            patchTab(activeTabId, {
+              focusedObjectName: null,
+              focusedRoutine: null,
+            });
+            setShowSqlEditor(true);
+          }}
+          onCloseSqlEditor={() => setShowSqlEditor(false)}
+          appVersion={APP_VERSION}
           onCloseFocusedObject={() => patchTab(activeTabId, { focusedObjectName: null })}
+          onCloseFocusedRoutine={() => patchTab(activeTabId, { focusedRoutine: null })}
           onOpenDeepSearch={() => setSearchOpen(true)}
           onSqlChange={(v) => patchTab(activeTabId, { sql: v })}
           onBookmarksChange={(next) => patchTab(activeTabId, { bookmarks: next })}
           onExecute={handleExecute}
           onDisconnect={handleDisconnect}
           onOpenStats={openStats}
+          stats={stats}
+          onRefreshStats={() => void refreshStats(activeTab.sessionId ?? '')}
+          onComputeRowCounts={computeRowCounts}
           onCommitCellEdit={handleCommitCellEdit}
           onCommitDdl={handleExecuteDdl}
           onFetchTableExport={handleFetchTableExport}
@@ -1558,27 +2162,14 @@ export function App() {
             }
           }}
           onSchemaAction={handleSchemaAction}
+          onPluginDdl={dispatchDdl}
           onClearError={() => patchTab(activeTabId, { error: null })}
           plugins={plugins}
-          onPickPluginPanel={(plugin, panel) => setOpenPluginPanel({ plugin, panel })}
           onShowDdl={handleShowDdl}
           onBrowseTable={handleBrowseTable}
         />
       )}
-      <DdlViewerModal
-        kind={ddlViewer?.kind ?? null}
-        name={ddlViewer?.name ?? null}
-        source={ddlViewer?.source ?? null}
-        loading={ddlViewer?.loading ?? false}
-        error={ddlViewer?.error ?? null}
-        onClose={() => setDdlViewer(null)}
-        onOpenInEditor={(sql) => {
-          const id = newTab();
-          patchTab(id, { sql });
-          setActive(id);
-        }}
-      />
-      <StatusBar
+<StatusBar
         sessionId={activeTab.sessionId}
         health={activeTab.health}
         user={activeTab.form.user}
@@ -1654,6 +2245,11 @@ export function App() {
           setActive(id);
         }}
       />
+      <ConfirmationModal
+        request={confirmHead}
+        onConfirm={onConfirmHead}
+        onCancel={onCancelHead}
+      />
     </div>
   );
 }
@@ -1674,6 +2270,7 @@ interface ConnectViewProps {
   aliasesLoading: boolean;
   onListAliases: () => void;
   onBrowseFbclient: () => Promise<string | null>;
+  onBrowseDatabase: () => Promise<string | null>;
   onBrowseFbclientDir: () => Promise<{
     fbclientPath: string | null;
     hasFbcrypt: boolean;
@@ -1699,6 +2296,7 @@ function ConnectView({
   aliasesLoading,
   onListAliases,
   onBrowseFbclient,
+  onBrowseDatabase,
   onBrowseFbclientDir,
   onDownloadFbclient,
   fbclientReleases,
@@ -1736,6 +2334,7 @@ function ConnectView({
         aliasesLoading={aliasesLoading}
         onListAliases={onListAliases}
         onBrowseFbclient={onBrowseFbclient}
+        onBrowseDatabase={onBrowseDatabase}
         onBrowseFbclientDir={onBrowseFbclientDir}
         onDownloadFbclient={onDownloadFbclient}
         fbclientReleases={fbclientReleases}
@@ -1752,8 +2351,14 @@ interface SessionViewProps {
   onDisconnect: () => void;
   onRefreshSchema: () => void;
   onSchemaAction: (action: SchemaAction) => void;
+  onPluginDdl: (ddl: SchemaDdl) => void;
   onClearError: () => void;
   onOpenStats: () => void;
+  stats: DatabaseStats | null;
+  onRefreshStats: () => void;
+  onComputeRowCounts: () => Promise<
+    { name: string; kind: 'table' | 'view'; count: number | null; error?: string }[]
+  >;
   onCommitCellEdit: (sql: string) => Promise<void>;
   onCommitDdl: (sql: string) => Promise<void>;
   onFetchTableExport: (table: TableInfo) => Promise<TableExportPart>;
@@ -1767,13 +2372,62 @@ interface SessionViewProps {
   >;
   onReconnect: () => void;
   plugins: ActivePlugin[];
-  onPickPluginPanel: (plugin: ActivePlugin, panel: SidebarPanelInfo) => void;
   onShowDdl: (kind: DdlSourceKind, name: string) => void;
   onBrowseTable: (name: string) => Promise<void>;
   onCloseFocusedObject: () => void;
+  onCloseFocusedRoutine: () => void;
   showSettings: boolean;
   onCloseSettings: () => void;
+  showPlugins: boolean;
+  onClosePlugins: () => void;
+  showAbout: boolean;
+  onCloseAbout: () => void;
+  showSqlEditor: boolean;
+  onOpenSqlEditor: () => void;
+  onCloseSqlEditor: () => void;
+  appVersion: string;
   onOpenDeepSearch: () => void;
+}
+
+const SESSION_KEY_PREFIX = 'plamenix.session.';
+
+function readStashedSession(tabId: string): string | null {
+  try {
+    return window.sessionStorage.getItem(SESSION_KEY_PREFIX + tabId);
+  } catch {
+    return null;
+  }
+}
+
+function writeStashedSession(tabId: string, sessionId: string): void {
+  try {
+    window.sessionStorage.setItem(SESSION_KEY_PREFIX + tabId, sessionId);
+  } catch {
+    /* sessionStorage unavailable — silent no-op. */
+  }
+}
+
+function clearStashedSession(tabId: string): void {
+  try {
+    window.sessionStorage.removeItem(SESSION_KEY_PREFIX + tabId);
+  } catch {
+    /* no-op. */
+  }
+}
+
+function summariseResults(
+  results: StatementOutcome[] | null,
+): { totalDurationMs: number; totalRows: number; statementCount: number } | null {
+  if (!results || results.length === 0) return null;
+  let totalDurationMs = 0;
+  let totalRows = 0;
+  for (const r of results) {
+    totalDurationMs += r.durationMs;
+    if (r.status === 'ok' && 'Rows' in r.result) {
+      totalRows += r.result.Rows.rows.length;
+    }
+  }
+  return { totalDurationMs, totalRows, statementCount: results.length };
 }
 
 function SessionView({
@@ -1784,8 +2438,12 @@ function SessionView({
   onDisconnect,
   onRefreshSchema,
   onSchemaAction,
+  onPluginDdl,
   onClearError,
   onOpenStats,
+  stats,
+  onRefreshStats,
+  onComputeRowCounts,
   onCommitCellEdit,
   onCommitDdl,
   onFetchTableExport,
@@ -1797,12 +2455,20 @@ function SessionView({
   onFetchScopedRows,
   onReconnect,
   plugins,
-  onPickPluginPanel,
   onShowDdl,
   onBrowseTable,
   onCloseFocusedObject,
+  onCloseFocusedRoutine,
   showSettings,
   onCloseSettings,
+  showPlugins,
+  onClosePlugins,
+  showAbout,
+  onCloseAbout,
+  showSqlEditor,
+  onOpenSqlEditor,
+  onCloseSqlEditor,
+  appVersion,
   onOpenDeepSearch,
 }: SessionViewProps) {
   const sidebarCollapsed = useThemeStore((s) => s.sidebarCollapsed);
@@ -1847,13 +2513,17 @@ function SessionView({
                 )
               }
               onOpenObject={(target) => {
-                if (target.kind === 'table') {
+                // Tables AND views support `SELECT * FROM <name>` —
+                // route both through the rich TableObjectView so views
+                // get their data tab, not just a DDL dump.
+                if (target.kind === 'table' || target.kind === 'view') {
                   void onBrowseTable(target.name);
                 } else {
                   onShowDdl(target.kind, target.name);
                 }
               }}
               onAction={onSchemaAction}
+              onPluginDdl={onPluginDdl}
               onNewTable={() => setSchemaEditorOpen(true)}
               onPickObjectList={(kind) => setObjectListKind(kind)}
               onNewObject={(kind) => setNewObjectKind(kind)}
@@ -1863,11 +2533,55 @@ function SessionView({
               onOpenDeepSearch={onOpenDeepSearch}
             />
           </div>
-          <PluginsSidebar plugins={plugins} onPickPanel={onPickPluginPanel} />
+          <button
+            type="button"
+            onClick={showSqlEditor ? onCloseSqlEditor : onOpenSqlEditor}
+            aria-pressed={showSqlEditor}
+            className={
+              'flex w-full shrink-0 items-center justify-center gap-2 px-3 py-2 text-[12px] font-semibold text-white shadow-sm transition-colors ' +
+              (showSqlEditor
+                ? 'bg-blue-600 hover:bg-blue-500'
+                : 'bg-emerald-600 hover:bg-emerald-500')
+            }
+            title={showSqlEditor ? 'Close full SQL editor' : 'Open full SQL editor'}
+          >
+            <SqlEditorIcon className="h-3.5 w-3.5" />
+            SQL Editor
+          </button>
         </div>
       )}
-      {showSettings ? (
+      {showAbout ? (
+        <AboutPage version={appVersion} onClose={onCloseAbout} backLabel="Back to session" />
+      ) : showPlugins ? (
+        <PluginsPage
+          plugins={plugins}
+          onClose={onClosePlugins}
+          backLabel="Back to session"
+        />
+      ) : showSettings ? (
         <SettingsPage onClose={onCloseSettings} backLabel="Back to session" />
+      ) : showSqlEditor ? (
+        <SqlEditorPage
+          sql={tab.sql}
+          onSqlChange={onSqlChange}
+          schema={tab.schema}
+          busy={tab.busy}
+          onExecute={() => onExecute()}
+          bookmarks={tab.bookmarks}
+          onBookmarksChange={onBookmarksChange}
+          results={tab.results}
+          schemaForResults={tab.schema}
+          tabId={tab.id}
+          sessionId={tab.sessionId}
+          columnWidths={tab.columnWidths}
+          onColumnWidthsChange={onColumnWidthsChange}
+          onCommitCellEdit={onCommitCellEdit}
+          onApplyFilter={onApplyFilter}
+          onFetchBlob={onFetchBlob}
+          onCountAllRows={onCountAllRows}
+          onFetchScopedRows={onFetchScopedRows}
+          onClose={onCloseSqlEditor}
+        />
       ) : objectListKind && tab.schema ? (
         <ObjectListPage
           kind={objectListKind}
@@ -1879,7 +2593,7 @@ function SessionView({
           onShowDdl={onShowDdl}
         />
       ) : (
-        <main className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
+        <main className="flex flex-1 flex-col gap-6 overflow-y-auto px-6 pb-6 pt-0">
           <QueryPanel
             sessionId={tab.sessionId}
             sql={tab.sql}
@@ -1890,17 +2604,43 @@ function SessionView({
             health={tab.health}
             engineVersion={tab.engineVersion}
             encryptionKeySupplied={tab.form.encryptionKey.length > 0}
+            lastResultSummary={summariseResults(tab.results)}
             onSqlChange={onSqlChange}
             onExecute={onExecute}
             onClose={onDisconnect}
             onBookmarksChange={onBookmarksChange}
             onOpenStats={onOpenStats}
             onReconnect={onReconnect}
+            onEditorFocus={() =>
+              emitEditorFocused({ tabId: tab.id, focusedAt: Date.now() })
+            }
+            onEditorSelectionChange={(sel) =>
+              emitEditorSelectionChanged({
+                tabId: tab.id,
+                anchor: sel.anchor,
+                head: sel.head,
+                length: sel.head - sel.anchor,
+                changedAt: Date.now(),
+              })
+            }
           />
 
           {tab.error && <ErrorBanner error={tab.error} onDismiss={onClearError} />}
 
           {(() => {
+            if (tab.focusedRoutine) {
+              return (
+                <RoutineObjectView
+                  kind={tab.focusedRoutine.kind}
+                  name={tab.focusedRoutine.name}
+                  source={tab.focusedRoutine.source}
+                  loading={tab.focusedRoutine.loading}
+                  error={tab.focusedRoutine.error}
+                  onClose={onCloseFocusedRoutine}
+                  onOpenInEditor={(sql) => onSqlChange(sql)}
+                />
+              );
+            }
             const focusedTable =
               tab.focusedObjectName && tab.schema
                 ? tab.schema.tables.find((t) => t.name === tab.focusedObjectName) ?? null
@@ -1908,6 +2648,7 @@ function SessionView({
             if (focusedTable && tab.results && tab.results.length > 0) {
               return (
                 <TableObjectView
+                  tabId={tab.id}
                   table={focusedTable}
                   results={tab.results}
                   schema={tab.schema}
@@ -1927,6 +2668,8 @@ function SessionView({
             if (tab.results && tab.results.length > 0) {
               return (
                 <MultiResultView
+                  tabId={tab.id}
+                  sessionId={tab.sessionId}
                   outcomes={tab.results}
                   schema={tab.schema}
                   onCommitCellEdit={onCommitCellEdit}
@@ -1952,6 +2695,12 @@ function SessionView({
               schema={tab.schema}
               recentKey={recentKeyOf(tab.form, tab.profileName)}
               onPickRecent={(sql) => onSqlChange(sql)}
+              stats={stats}
+              onRefreshStats={onRefreshStats}
+              onComputeRowCounts={onComputeRowCounts}
+              onRefreshSchema={onRefreshSchema}
+              onNewQuery={() => onSqlChange('')}
+              embedded={tab.form.embedded}
             />
           )}
         </main>

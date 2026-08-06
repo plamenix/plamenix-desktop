@@ -55,6 +55,9 @@ pub struct ProfileDraft {
     /// which falls back to `UTF8`.
     #[serde(default)]
     pub charset: Option<String>,
+    /// `true` when the profile attaches via Firebird's embedded engine.
+    #[serde(default)]
+    pub embedded: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +113,7 @@ pub fn profile_save(
         last_disconnected_at: None,
         fbclient_path: draft.fbclient_path.filter(|s| !s.is_empty()),
         charset: draft.charset.filter(|s| !s.is_empty()),
+        embedded: draft.embedded,
     };
 
     if let Ok(existing) = state.store.get(id) {

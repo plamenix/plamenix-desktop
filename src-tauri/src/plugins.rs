@@ -279,14 +279,12 @@ async fn load_and_activate(
 
     let required_permissions: Vec<String> = manifest
         .permissions
-        .required
-        .iter()
+        .required_caps()
         .map(|p| p.to_string())
         .collect();
     let optional_permissions: Vec<String> = manifest
         .permissions
-        .optional
-        .iter()
+        .optional_caps()
         .map(|p| p.to_string())
         .collect();
     let granted_set = grants.granted_for(&manifest.plugin.id);
