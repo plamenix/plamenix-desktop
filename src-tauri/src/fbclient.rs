@@ -38,9 +38,21 @@ pub struct FirebirdRelease {
 }
 
 pub const RELEASES: &[FirebirdRelease] = &[
-    FirebirdRelease { version: "5.0.3", build: "5.0.3.1683-0", major: "v50" },
-    FirebirdRelease { version: "4.0.5", build: "4.0.5.3140-0", major: "v40" },
-    FirebirdRelease { version: "3.0.12", build: "3.0.12.33787-0", major: "v30" },
+    FirebirdRelease {
+        version: "5.0.3",
+        build: "5.0.3.1683-0",
+        major: "v50",
+    },
+    FirebirdRelease {
+        version: "4.0.5",
+        build: "4.0.5.3140-0",
+        major: "v40",
+    },
+    FirebirdRelease {
+        version: "3.0.12",
+        build: "3.0.12.33787-0",
+        major: "v30",
+    },
 ];
 
 /// Convenience: latest release (`RELEASES[0]`). Used as the default
@@ -142,10 +154,7 @@ fn extract_tarball(archive: &Path, out_dir: &Path) -> Result<PathBuf, DownloadEr
         let mut entry = entry?;
         let path = entry.path()?.into_owned();
         let name = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        if name == "libfbclient.so"
-            || name.starts_with("libfbclient.so.")
-            || name == "fbclient"
-        {
+        if name == "libfbclient.so" || name.starts_with("libfbclient.so.") || name == "fbclient" {
             let mut out = fs::File::create(&target)?;
             std::io::copy(&mut entry, &mut out)?;
             return Ok(target);
@@ -157,8 +166,8 @@ fn extract_tarball(archive: &Path, out_dir: &Path) -> Result<PathBuf, DownloadEr
 /// Scans a `.zip` for `fbclient.dll`.
 fn extract_zip(archive: &Path, out_dir: &Path) -> Result<PathBuf, DownloadError> {
     let file = fs::File::open(archive)?;
-    let mut zip = zip::ZipArchive::new(file)
-        .map_err(|err| DownloadError::Extract(err.to_string()))?;
+    let mut zip =
+        zip::ZipArchive::new(file).map_err(|err| DownloadError::Extract(err.to_string()))?;
     let target = out_dir.join(target_filename());
     for i in 0..zip.len() {
         let mut entry = zip

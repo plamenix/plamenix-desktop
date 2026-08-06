@@ -199,7 +199,10 @@ fn column_exists(conn: &Connection, table: &str, column: &str) -> Result<bool, S
     let mut rows = stmt
         .query([])
         .map_err(|e| format!("query table_info: {e}"))?;
-    while let Some(row) = rows.next().map_err(|e| format!("read table_info row: {e}"))? {
+    while let Some(row) = rows
+        .next()
+        .map_err(|e| format!("read table_info row: {e}"))?
+    {
         let name: String = row.get(1).map_err(|e| format!("read column name: {e}"))?;
         if name == column {
             return Ok(true);

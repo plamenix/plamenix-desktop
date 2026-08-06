@@ -76,7 +76,11 @@ pub async fn db_connect(
     state: State<'_, DbState>,
     request: ConnectRequest,
 ) -> Result<ConnectResponse, String> {
-    let mode = if request.pure_rust { ConnectMode::PureRust } else { ConnectMode::Native };
+    let mode = if request.pure_rust {
+        ConnectMode::PureRust
+    } else {
+        ConnectMode::Native
+    };
     let mut config = request.config;
     apply_fbclient_fallback(&mut config, request.pure_rust, &app);
     state
@@ -140,7 +144,10 @@ pub async fn db_execute(
         };
         match driver.execute(session_id, exec_sql).await {
             Ok(mut result) => {
-                if let QueryResult::Rows { rows, truncated, .. } = &mut result {
+                if let QueryResult::Rows {
+                    rows, truncated, ..
+                } = &mut result
+                {
                     if rows.len() > ROW_LIMIT as usize {
                         rows.truncate(ROW_LIMIT as usize);
                         *truncated = true;
@@ -152,15 +159,9 @@ pub async fn db_execute(
                         QueryResult::Rows { rows, .. } => Some(rows.len() as i64),
                         QueryResult::Affected { rows } => Some(*rows as i64),
                     };
-                    if let Err(e) = history.record(
-                        pid,
-                        &sql,
-                        duration_ms,
-                        "ok",
-                        None,
-                        row_count,
-                        history_limit,
-                    ) {
+                    if let Err(e) =
+                        history.record(pid, &sql, duration_ms, "ok", None, row_count, history_limit)
+                    {
                         tracing::warn!(?e, "history record failed");
                     }
                 }
@@ -219,10 +220,7 @@ pub fn history_list(
 }
 
 #[tauri::command]
-pub fn history_clear(
-    history: State<'_, HistoryStore>,
-    profile_id: String,
-) -> Result<u64, String> {
+pub fn history_clear(history: State<'_, HistoryStore>, profile_id: String) -> Result<u64, String> {
     history.clear(&profile_id)
 }
 
@@ -245,10 +243,7 @@ pub fn history_set_label(
 }
 
 #[tauri::command]
-pub fn history_delete(
-    history: State<'_, HistoryStore>,
-    id: i64,
-) -> Result<bool, String> {
+pub fn history_delete(history: State<'_, HistoryStore>, id: i64) -> Result<bool, String> {
     history.delete(id)
 }
 
@@ -268,20 +263,22 @@ pub fn history_delete_many(
 
 #[tauri::command]
 #[tracing::instrument(name = "cmd.db_ping", skip(state), fields(session = %session_id.0))]
-pub async fn db_ping(
-    state: State<'_, DbState>,
-    session_id: SessionId,
-) -> Result<String, String> {
-    state.driver().ping(session_id).await.map_err(|err| err.to_string())
+pub async fn db_ping(state: State<'_, DbState>, session_id: SessionId) -> Result<String, String> {
+    state
+        .driver()
+        .ping(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 #[tracing::instrument(name = "cmd.db_close", skip(state), fields(session = %session_id.0))]
-pub async fn db_close(
-    state: State<'_, DbState>,
-    session_id: SessionId,
-) -> Result<(), String> {
-    state.driver().close(session_id).await.map_err(|err| err.to_string())
+pub async fn db_close(state: State<'_, DbState>, session_id: SessionId) -> Result<(), String> {
+    state
+        .driver()
+        .close(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 /// Switches a session between autocommit and manual commit.
@@ -369,7 +366,11 @@ pub async fn db_crypt_state(
     state: State<'_, DbState>,
     session_id: SessionId,
 ) -> Result<CryptState, String> {
-    state.driver().crypt_state(session_id).await.map_err(|err| err.to_string())
+    state
+        .driver()
+        .crypt_state(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -403,7 +404,8 @@ pub async fn db_test_connection(
     apply_fbclient_fallback(&mut config, request.pure_rust, &app);
     match driver.connect(config, mode).await {
         Ok(session_id) => {
-            let version_sql = "SELECT rdb$get_context('SYSTEM', 'ENGINE_VERSION') FROM rdb$database";
+            let version_sql =
+                "SELECT rdb$get_context('SYSTEM', 'ENGINE_VERSION') FROM rdb$database";
             let firebird_version = match driver.execute(session_id, version_sql.to_string()).await {
                 Ok(QueryResult::Rows { rows, .. }) => rows
                     .first()
@@ -469,9 +471,22 @@ fn candidate_databases_conf_paths() -> Vec<PathBuf> {
 /// is skipped — only the inline form is harvested.
 fn parse_databases_conf(text: &str) -> Vec<DatabaseAlias> {
     let mut out = Vec::new();
+    // Depth of the `alias = { ... }` block form. Skipping only the
+    // opening line was not enough: the body's own `Database = /path`
+    // entries then parsed as top-level aliases, so a single block
+    // produced a bogus alias named `Database`.
+    let mut block_depth = 0usize;
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if block_depth > 0 {
+            if line.contains('}') {
+                block_depth -= 1;
+            } else if line.ends_with('{') {
+                block_depth += 1;
+            }
             continue;
         }
         let Some(eq) = line.find('=') else { continue };
@@ -481,7 +496,10 @@ fn parse_databases_conf(text: &str) -> Vec<DatabaseAlias> {
             continue;
         }
         if path_part.starts_with('{') {
-            // Block form — skip; we'd need multi-line state to walk it.
+            // Block form. Per-database settings live inside; the alias
+            // itself is not usable as a path, so the whole block is
+            // skipped rather than half-read.
+            block_depth += 1;
             continue;
         }
         if alias.chars().any(char::is_whitespace) {
@@ -506,6 +524,17 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].alias, "employee");
         assert_eq!(out[0].path, "/var/firebird/employee.fdb");
+    }
+
+    #[test]
+    fn block_body_does_not_leak_as_an_alias() {
+        // The body's `Database = /path` line looks exactly like a
+        // top-level entry, so skipping only the opening `alias = {`
+        // produced a bogus alias named `Database`.
+        let conf = "foo = {\n  Database = /tmp/foo.fdb\n  DefaultDbCachePages = 100\n}\nbar = /tmp/bar.fdb\n";
+        let out = parse_databases_conf(conf);
+        assert_eq!(out.len(), 1, "unexpected aliases: {out:?}");
+        assert_eq!(out[0].alias, "bar");
     }
 
     #[test]

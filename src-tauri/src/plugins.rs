@@ -124,6 +124,44 @@ impl PluginsState {
         &self.grants
     }
 
+    /// Records a user grant, but only for a capability the plugin's
+    /// manifest actually declared.
+    ///
+    /// The grant store validates the capability grammar, which stops
+    /// arbitrary strings but not a well-formed capability the plugin
+    /// never asked for. Without this check a grant could be recorded
+    /// for, say, `fs.write.dir.plugin-data` on a plugin whose manifest
+    /// requests nothing of the kind — and once runtime gates consult
+    /// the grant store, the plugin would hold a capability no install
+    /// dialog ever showed the user.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the plugin is unknown, or when the
+    /// capability is outside its declared required and optional sets.
+    pub fn grant_declared(&self, plugin_id: &str, permission: &str) -> Result<(), String> {
+        let declared = self
+            .snapshot()
+            .into_iter()
+            .find(|p| p.id == plugin_id)
+            .ok_or_else(|| format!("unknown plugin: {plugin_id}"))?;
+
+        let is_declared = declared
+            .required_permissions
+            .iter()
+            .chain(declared.optional_permissions.iter())
+            .any(|p| p == permission);
+
+        if !is_declared {
+            return Err(format!(
+                "plugin `{plugin_id}` does not declare `{permission}`; \
+                 a capability can only be granted when its manifest asks for it",
+            ));
+        }
+
+        self.grants.grant(plugin_id, permission)
+    }
+
     /// Recomputes the granted/pending lists on every active plugin
     /// after a grant change. Called by the grant/revoke commands.
     pub fn rebuild_permission_view(&self) {
@@ -230,7 +268,11 @@ pub async fn bootstrap(
     let entries = match std::fs::read_dir(plugins_root) {
         Ok(e) => e,
         Err(err) => {
-            tracing::warn!(?err, ?plugins_root, "plugins root unreadable, skipping discovery");
+            tracing::warn!(
+                ?err,
+                ?plugins_root,
+                "plugins root unreadable, skipping discovery"
+            );
             return out;
         }
     };
@@ -331,4 +373,66 @@ pub fn resolve_plugins_root(resource_dir: &Path) -> PathBuf {
         })
         .unwrap_or(bundled);
     candidate
+}
+
+#[cfg(test)]
+mod grant_scope_tests {
+    use super::*;
+    use tempfile::tempdir;
+
+    fn plugin(id: &str, required: &[&str], optional: &[&str]) -> ActivePlugin {
+        ActivePlugin {
+            id: id.to_string(),
+            name: id.to_string(),
+            version: "1.0.0".into(),
+            description: None,
+            sidebar_panels: Vec::new(),
+            logs: Vec::new(),
+            activation: ActivationInfo::Ok,
+            required_permissions: required.iter().map(|s| (*s).to_string()).collect(),
+            optional_permissions: optional.iter().map(|s| (*s).to_string()).collect(),
+            granted_permissions: Vec::new(),
+            pending_permissions: Vec::new(),
+        }
+    }
+
+    fn state_with(plugins: Vec<ActivePlugin>) -> (PluginsState, tempfile::TempDir) {
+        let dir = tempdir().expect("tempdir");
+        let store = Arc::new(GrantStore::open(dir.path().join("grants.json")));
+        let state = PluginsState::new(store);
+        state.replace(plugins);
+        (state, dir)
+    }
+
+    #[test]
+    fn a_declared_capability_can_be_granted() {
+        let (state, _dir) = state_with(vec![plugin("a.b", &["db.read.any"], &["net.https"])]);
+        state
+            .grant_declared("a.b", "db.read.any")
+            .expect("required");
+        state.grant_declared("a.b", "net.https").expect("optional");
+        assert_eq!(state.grants().granted_for("a.b").len(), 2);
+    }
+
+    #[test]
+    fn an_undeclared_capability_is_refused() {
+        // The grammar accepts this string, so only the manifest check
+        // stands between a well-formed capability and a grant the
+        // install dialog never showed the user.
+        let (state, _dir) = state_with(vec![plugin("a.b", &["db.read.any"], &[])]);
+        let err = state
+            .grant_declared("a.b", "db.write.any")
+            .expect_err("undeclared capability must be refused");
+        assert!(err.contains("does not declare"), "unhelpful error: {err}");
+        assert!(state.grants().granted_for("a.b").is_empty());
+    }
+
+    #[test]
+    fn an_unknown_plugin_is_refused() {
+        let (state, _dir) = state_with(Vec::new());
+        let err = state
+            .grant_declared("ghost", "db.read.any")
+            .expect_err("unknown plugin must be refused");
+        assert!(err.contains("unknown plugin"), "unhelpful error: {err}");
+    }
 }

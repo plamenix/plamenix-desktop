@@ -19,7 +19,7 @@ pub fn plugin_grant_permission(
     plugin_id: String,
     permission: String,
 ) -> Result<Vec<ActivePlugin>, String> {
-    state.grants().grant(&plugin_id, &permission)?;
+    state.grant_declared(&plugin_id, &permission)?;
     state.rebuild_permission_view();
     Ok(state.snapshot())
 }

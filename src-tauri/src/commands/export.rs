@@ -13,7 +13,9 @@
 //! something to emit, so the frontend can wire the listener before
 //! the first chunk arrives.
 
-use plamenix_db::export::{format_csv, format_json, format_sql, format_xml, CsvDelimiter, ExportPart};
+use plamenix_db::export::{
+    CsvDelimiter, ExportPart, format_csv, format_json, format_sql, format_xml,
+};
 use plamenix_db::{DbDriver, QueryResult, SessionId};
 use plamenix_types::TableInfo;
 use serde::{Deserialize, Serialize};
@@ -189,7 +191,10 @@ pub async fn db_export(
                 let err = e.to_string();
                 let _ = app.emit(
                     "export:err",
-                    ExportErr { export_id: export_id.clone(), error: err.clone() },
+                    ExportErr {
+                        export_id: export_id.clone(),
+                        error: err.clone(),
+                    },
                 );
                 return Err(err);
             }
@@ -199,7 +204,12 @@ pub async fn db_export(
 
     // Extract Rows variants up front so we can lend `&[Column]` /
     // `&[Row]` references to ExportPart without re-iterating.
-    let mut row_payloads: Vec<(Option<TableInfo>, Option<String>, Vec<plamenix_db::Column>, Vec<plamenix_db::Row>)> = Vec::with_capacity(owned.len());
+    let mut row_payloads: Vec<(
+        Option<TableInfo>,
+        Option<String>,
+        Vec<plamenix_db::Column>,
+        Vec<plamenix_db::Row>,
+    )> = Vec::with_capacity(owned.len());
     for (table, label, qr) in owned {
         match qr {
             QueryResult::Rows { columns, rows, .. } => {
@@ -242,7 +252,10 @@ pub async fn db_export(
     }
     if let Err(err) = app.emit(
         "export:done",
-        ExportDone { export_id: export_id.clone(), total_bytes },
+        ExportDone {
+            export_id: export_id.clone(),
+            total_bytes,
+        },
     ) {
         tracing::warn!(?err, "failed to emit export:done");
     }

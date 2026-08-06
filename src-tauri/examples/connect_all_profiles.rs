@@ -43,7 +43,10 @@ const BUNDLED_FBCLIENT_REL: &str = "resources/fbclient/v50/Libraries/libfbclient
 
 fn profiles_path() -> PathBuf {
     let home = std::env::var_os("HOME").expect("HOME unset");
-    PathBuf::from(home).join("Library/Application Support").join(SERVICE).join("profiles.json")
+    PathBuf::from(home)
+        .join("Library/Application Support")
+        .join(SERVICE)
+        .join("profiles.json")
 }
 
 fn bundled_fbclient_path() -> Option<PathBuf> {
@@ -51,7 +54,11 @@ fn bundled_fbclient_path() -> Option<PathBuf> {
     // can run from any CWD inside the workspace.
     let manifest_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
     let candidate = manifest_dir.parent()?.join(BUNDLED_FBCLIENT_REL);
-    if candidate.is_file() { Some(candidate) } else { None }
+    if candidate.is_file() {
+        Some(candidate)
+    } else {
+        None
+    }
 }
 
 fn load_profiles() -> Vec<Profile> {
@@ -64,7 +71,10 @@ fn load_profiles() -> Vec<Profile> {
 
 fn build_config(profile: &Profile) -> Result<ConnectionConfig, String> {
     let keyring = KeyringStore::new();
-    let runtime = RuntimeSecrets { password: None, encryption_key: None };
+    let runtime = RuntimeSecrets {
+        password: None,
+        encryption_key: None,
+    };
     let overrides = ConnectOverrides {
         pure_rust: None,
         encryption_required: None,
@@ -89,7 +99,9 @@ async fn main() {
     println!("profiles loaded: {}", profiles.len());
     println!(
         "bundled fbclient: {}",
-        bundled.as_ref().map_or("<not found>".to_string(), |p| p.display().to_string()),
+        bundled
+            .as_ref()
+            .map_or("<not found>".to_string(), |p| p.display().to_string()),
     );
     println!();
 

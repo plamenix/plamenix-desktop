@@ -16,9 +16,9 @@ use plugins::{
     GrantStore, PluginsState, bootstrap as plugin_bootstrap, default_grants_path,
     resolve_plugins_root,
 };
-use std::sync::Arc;
 use profiles::{ProfilesState, SERVICE};
 use semver::Version;
+use std::sync::Arc;
 use tauri::Manager;
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
