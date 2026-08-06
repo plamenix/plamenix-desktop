@@ -126,12 +126,21 @@ pub fn run() {
                         if let Some(state) = handle.try_state::<PluginsState>() {
                             state.start_epoch_ticker(&host);
                         }
+                        let (bus, supervisor) = match handle.try_state::<PluginsState>() {
+                            Some(state) => (state.bus(), state.supervisor()),
+                            None => (
+                                std::sync::Arc::new(plamenix_plugin_host::EventBus::new()),
+                                std::sync::Arc::new(plamenix_plugin_host::Supervisor::new()),
+                            ),
+                        };
                         let active = plugin_bootstrap(
                             &host,
                             &host_version,
                             &plugins_root,
                             &grants_store,
                             &instances,
+                            &bus,
+                            &supervisor,
                         )
                         .await;
                         let count = active.len();

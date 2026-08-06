@@ -14,8 +14,9 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use plamenix_plugin_host::{
-    ActivationOutcome, EpochTicker, HostState, InstanceRegistry, LogLevel, Permission, PluginError,
-    PluginHost, RecordedLog, SidebarPanel, activate_into_registry, load,
+    ActivationOutcome, EpochTicker, EventBus, HostState, InstanceRegistry, LogLevel, Permission,
+    PluginError, PluginHost, RecordedLog, RestartPolicy, SidebarPanel, SupervisedDelivery,
+    Supervisor, activate_into_registry, dispatch_event_supervised, load,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -113,6 +114,10 @@ pub struct PluginsState {
     /// looped ran until the process died. Held here so it lives as long
     /// as the instances it polices — dropping it stops the ticking.
     ticker: Mutex<Option<EpochTicker>>,
+    /// Topic subscriptions declared by plugin manifests.
+    bus: Arc<EventBus>,
+    /// Crash budget and restart policy per plugin.
+    supervisor: Arc<Supervisor>,
 }
 
 impl PluginsState {
@@ -122,7 +127,30 @@ impl PluginsState {
             grants,
             instances: Arc::new(InstanceRegistry::new()),
             ticker: Mutex::new(None),
+            bus: Arc::new(EventBus::new()),
+            supervisor: Arc::new(Supervisor::new()),
         }
+    }
+
+    /// Emits `topic` to every subscribed plugin, reporting failures to
+    /// the supervisor.
+    ///
+    /// The single entry point for host-originated events. Returns one
+    /// entry per subscriber so the caller can see who was reached and
+    /// what the supervisor made of any failure.
+    pub async fn emit_event(&self, topic: &str, payload: &str) -> Vec<SupervisedDelivery> {
+        dispatch_event_supervised(&self.bus, &self.instances, &self.supervisor, topic, payload)
+            .await
+    }
+
+    /// Subscriptions and supervision state, for the boot path to
+    /// populate as it activates each plugin.
+    pub fn bus(&self) -> Arc<EventBus> {
+        Arc::clone(&self.bus)
+    }
+
+    pub fn supervisor(&self) -> Arc<Supervisor> {
+        Arc::clone(&self.supervisor)
     }
 
     /// Starts the epoch ticker, if one is not already running.
@@ -300,6 +328,8 @@ pub async fn bootstrap(
     plugins_root: &Path,
     grants: &GrantStore,
     instances: &InstanceRegistry,
+    bus: &EventBus,
+    supervisor: &Supervisor,
 ) -> Vec<ActivePlugin> {
     let mut out = Vec::new();
 
@@ -320,7 +350,17 @@ pub async fn bootstrap(
         if !path.is_dir() {
             continue;
         }
-        match load_and_activate(host, host_version, &path, grants, instances).await {
+        match load_and_activate(
+            host,
+            host_version,
+            &path,
+            grants,
+            instances,
+            bus,
+            supervisor,
+        )
+        .await
+        {
             Ok(active) => out.push(active),
             Err(err) => {
                 tracing::warn!(?err, ?path, "plugin failed to load");
@@ -336,6 +376,8 @@ async fn load_and_activate(
     bundle: &Path,
     grants: &GrantStore,
     instances: &InstanceRegistry,
+    bus: &EventBus,
+    supervisor: &Supervisor,
 ) -> Result<ActivePlugin, PluginError> {
     let staged = load(host, host_version, bundle)?;
     let manifest = staged.manifest.clone();
@@ -348,7 +390,27 @@ async fn load_and_activate(
     // returns. A failed activation is not registered — the activator
     // drops that store itself — so the registry only ever holds
     // instances that are actually usable.
+    supervisor.register(&manifest.plugin.id, manifest.plugin.restart_policy)?;
+
     let outcome = activate_into_registry(host, state, &staged, instances).await?;
+
+    // Subscriptions and supervision come from the manifest, so they are
+    // recorded only once the plugin is actually running: a plugin that
+    // failed to activate must not sit in the bus collecting events it
+    // has no instance to receive.
+    if matches!(outcome, ActivationOutcome::Ok) {
+        supervisor.mark_active(&manifest.plugin.id, std::time::Instant::now())?;
+        for pattern in &manifest.contributions.event_subscriptions {
+            if let Err(err) = bus.subscribe(&manifest.plugin.id, pattern) {
+                tracing::warn!(
+                    plugin = %manifest.plugin.id,
+                    pattern,
+                    %err,
+                    "ignoring an event subscription the bus rejected",
+                );
+            }
+        }
+    }
 
     let logs: Vec<PluginLogEntry> = log_sink
         .lock()

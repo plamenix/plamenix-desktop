@@ -26,6 +26,7 @@ use tauri::{AppHandle, State};
 use crate::db::DbState;
 use crate::fbclient::bundled_path;
 use crate::history::HistoryStore;
+use crate::plugins::PluginsState;
 
 /// Substitutes the bundled fbclient when the caller did not supply
 /// one and native mode is in effect. Pure-Rust attaches skip this
@@ -111,7 +112,7 @@ pub struct ExecuteRequest {
 #[tauri::command]
 #[tracing::instrument(
     name = "cmd.db_execute",
-    skip(db, history, request),
+    skip(db, history, plugins, request),
     fields(
         session = %request.session_id.0,
         sql_len = request.sql.len(),
@@ -121,6 +122,7 @@ pub struct ExecuteRequest {
 pub async fn db_execute(
     db: State<'_, DbState>,
     history: State<'_, HistoryStore>,
+    plugins: State<'_, PluginsState>,
     request: ExecuteRequest,
 ) -> Result<Vec<StatementOutcome>, String> {
     let stmts = split_statements(&request.sql);
@@ -196,6 +198,23 @@ pub async fn db_execute(
             }
         }
     }
+    // The first host-originated event. Subscribers receive it through
+    // the same supervised path every future emit site will use, so a
+    // plugin that traps here consumes crash budget rather than failing
+    // the user's query.
+    let payload = serde_json::json!({
+        "statements": outcomes.len(),
+        "sessionId": session_id.0.to_string(),
+    })
+    .to_string();
+    let deliveries = plugins.emit_event("db/query/executed", &payload).await;
+    if !deliveries.is_empty() {
+        tracing::debug!(
+            subscribers = deliveries.len(),
+            "dispatched db/query/executed",
+        );
+    }
+
     Ok(outcomes)
 }
 
