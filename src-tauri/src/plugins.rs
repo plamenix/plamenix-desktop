@@ -13,14 +13,15 @@ use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
+use plamenix_meta::MetaStore;
 use plamenix_plugin_host::{
     ActivationOutcome, EpochTicker, EventBus, ExtensionPoint, HostState, InstanceRegistry,
     Interception, InterceptorRegistration, InterceptorRegistry, LogLevel, Permission, PluginError,
-    PluginHost, RecordedLog, RestartPolicy, SidebarPanel, SupervisedDelivery, Supervisor,
-    activate_into_registry, dispatch_event_supervised, load, run_chain,
+    PluginHost, RecordedLog, SidebarPanel, SupervisedDelivery, Supervisor, activate_into_registry,
+    dispatch_event_supervised, load, run_chain,
 };
 use semver::Version;
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 
 /// Top-level shape returned by the Tauri command `plugin_list_active`.
 #[derive(Clone, Debug, Serialize)]
@@ -255,7 +256,7 @@ impl PluginsState {
     ///
     /// Returns an error when the plugin is unknown, or when the
     /// capability is outside its declared required and optional sets.
-    pub fn grant_declared(&self, plugin_id: &str, permission: &str) -> Result<(), String> {
+    pub async fn grant_declared(&self, plugin_id: &str, permission: &str) -> Result<(), String> {
         let declared = self
             .snapshot()
             .into_iter()
@@ -275,7 +276,7 @@ impl PluginsState {
             ));
         }
 
-        self.grants.grant(plugin_id, permission)
+        self.grants.grant(plugin_id, permission).await
     }
 
     /// Recomputes the granted/pending lists on every active plugin
@@ -298,83 +299,99 @@ impl PluginsState {
     }
 }
 
-/// On-disk grant store. JSON file: `{ "<plugin_id>": ["perm1", ...] }`.
-/// Lives next to `profiles.json` and `plamenix-meta.fdb` under the
-/// app config directory.
+/// Plugin capability grants, in Plamenix's own metadata database.
 ///
-/// Note the asymmetry: the web edition keeps its grants in the
-/// metadata database, this edition still keeps them here. Two
-/// implementations of one thing, which is the duplication the metadata
-/// database exists to end — `plamenix_meta` already has the grant
-/// calls this would move onto.
+/// This was a JSON file beside `profiles.json` while the web edition
+/// kept the same grants in a database — two implementations of one
+/// thing. Both editions now write to [`plamenix_meta::MetaStore`].
+///
+/// The in-memory map is a read cache, not the authority. It exists
+/// because [`plamenix_plugin_host::HostServices::granted_for`] is
+/// synchronous and runs once per plugin call, and a database round trip
+/// on that path would tax every event dispatch. The web edition keeps
+/// the same shape for the same reason: napi holds the runtime set,
+/// the database is what it replays from.
+///
+/// Writes go to the database first and update the cache only on
+/// success, so a failed write leaves the cache honest rather than
+/// promising a capability that did not persist.
 pub struct GrantStore {
-    path: PathBuf,
-    state: Mutex<HashMap<String, HashSet<String>>>,
+    meta: Arc<MetaStore>,
+    cache: Mutex<HashMap<String, HashSet<String>>>,
 }
 
-#[derive(Default, Serialize, Deserialize)]
-#[serde(transparent)]
-struct GrantsFile(HashMap<String, HashSet<String>>);
-
 impl GrantStore {
-    pub fn open(path: PathBuf) -> Self {
-        let state = std::fs::read_to_string(&path)
-            .ok()
-            .and_then(|text| serde_json::from_str::<GrantsFile>(&text).ok())
-            .map(|f| f.0)
-            .unwrap_or_default();
-        Self {
-            path,
-            state: Mutex::new(state),
-        }
+    /// Reads every grant into the cache.
+    ///
+    /// # Errors
+    ///
+    /// A human-readable message when the metadata database cannot be
+    /// read. Starting with an empty cache instead would silently
+    /// un-grant every capability the user has ever approved, and the
+    /// plugins would look merely unlucky rather than broken.
+    pub async fn open(meta: Arc<MetaStore>) -> Result<Self, String> {
+        let all = meta.all_grants().await.map_err(|err| err.to_string())?;
+        let cache = all
+            .into_iter()
+            .map(|(plugin, perms)| (plugin, perms.into_iter().collect()))
+            .collect();
+        Ok(Self {
+            meta,
+            cache: Mutex::new(cache),
+        })
     }
 
     pub fn snapshot(&self) -> HashMap<String, HashSet<String>> {
-        self.state.lock().map(|g| g.clone()).unwrap_or_default()
+        self.cache.lock().map(|g| g.clone()).unwrap_or_default()
     }
 
     pub fn granted_for(&self, plugin_id: &str) -> HashSet<String> {
-        self.state
+        self.cache
             .lock()
             .ok()
             .and_then(|g| g.get(plugin_id).cloned())
             .unwrap_or_default()
     }
 
-    pub fn grant(&self, plugin_id: &str, permission: &str) -> Result<(), String> {
+    /// Records a grant.
+    ///
+    /// # Errors
+    ///
+    /// When the capability is outside the grammar, or the write fails.
+    pub async fn grant(&self, plugin_id: &str, permission: &str) -> Result<(), String> {
         // Validate against the grammar — refuse arbitrary strings.
         let _ = Permission::parse(permission).map_err(|e| e.to_string())?;
-        let mut guard = self.state.lock().map_err(|e| e.to_string())?;
+        self.meta
+            .grant(plugin_id, permission)
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut guard = self.cache.lock().map_err(|e| e.to_string())?;
         guard
             .entry(plugin_id.to_string())
             .or_default()
             .insert(permission.to_string());
-        self.persist(&guard)
+        Ok(())
     }
 
-    pub fn revoke(&self, plugin_id: &str, permission: &str) -> Result<(), String> {
-        let mut guard = self.state.lock().map_err(|e| e.to_string())?;
+    /// Withdraws a grant. Revoking one never granted is a no-op.
+    ///
+    /// # Errors
+    ///
+    /// When the write fails.
+    pub async fn revoke(&self, plugin_id: &str, permission: &str) -> Result<(), String> {
+        self.meta
+            .revoke(plugin_id, permission)
+            .await
+            .map_err(|err| err.to_string())?;
+        let mut guard = self.cache.lock().map_err(|e| e.to_string())?;
         if let Some(set) = guard.get_mut(plugin_id) {
             set.remove(permission);
             if set.is_empty() {
                 guard.remove(plugin_id);
             }
         }
-        self.persist(&guard)
+        Ok(())
     }
-
-    fn persist(&self, state: &HashMap<String, HashSet<String>>) -> Result<(), String> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent).map_err(|e| format!("create grants dir: {e}"))?;
-        }
-        let text = serde_json::to_string_pretty(&GrantsFile(state.clone()))
-            .map_err(|e| format!("serialize grants: {e}"))?;
-        std::fs::write(&self.path, text).map_err(|e| format!("write grants file: {e}"))
-    }
-}
-
-pub fn default_grants_path(app_config_dir: &Path) -> PathBuf {
-    app_config_dir.join("plugin_grants.json")
 }
 
 /// Loads every plugin bundle under `plugins_root` and returns the
@@ -615,44 +632,148 @@ mod grant_scope_tests {
         }
     }
 
-    fn state_with(plugins: Vec<ActivePlugin>) -> (PluginsState, tempfile::TempDir) {
-        let dir = tempdir().expect("tempdir");
-        let store = Arc::new(GrantStore::open(dir.path().join("grants.json")));
-        let state = PluginsState::new(store);
-        state.replace(plugins);
-        (state, dir)
+    /// The full Firebird install the app ships.
+    ///
+    /// Grants live in a real database now, so these need the engine.
+    /// Skipped rather than faked: a fake store would prove the state
+    /// machine calls a function and not that a grant persists.
+    fn bundled_fbclient() -> Option<String> {
+        let path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../resources/fbclient/v50/Resources/lib/libfbclient.dylib");
+        path.exists().then(|| path.to_string_lossy().into_owned())
     }
 
-    #[test]
-    fn a_declared_capability_can_be_granted() {
-        let (state, _dir) = state_with(vec![plugin("a.b", &["db.read.any"], &["net.https"])]);
+    async fn state_with(plugins: Vec<ActivePlugin>) -> Option<(PluginsState, tempfile::TempDir)> {
+        let dir = tempdir().expect("tempdir");
+        let meta = Arc::new(
+            MetaStore::open(dir.path().join("meta.fdb"), Some(bundled_fbclient()?))
+                .await
+                .expect("open metadata database"),
+        );
+        let store = Arc::new(GrantStore::open(meta).await.expect("load grants"));
+        let state = PluginsState::new(store);
+        state.replace(plugins);
+        Some((state, dir))
+    }
+
+    #[tokio::test]
+    async fn a_declared_capability_can_be_granted() {
+        let Some((state, _dir)) =
+            state_with(vec![plugin("a.b", &["db.read.any"], &["net.https"])]).await
+        else {
+            println!("SKIPPED: bundled fbclient not found");
+            return;
+        };
         state
             .grant_declared("a.b", "db.read.any")
+            .await
             .expect("required");
-        state.grant_declared("a.b", "net.https").expect("optional");
+        state
+            .grant_declared("a.b", "net.https")
+            .await
+            .expect("optional");
         assert_eq!(state.grants().granted_for("a.b").len(), 2);
     }
 
-    #[test]
-    fn an_undeclared_capability_is_refused() {
+    #[tokio::test]
+    async fn an_undeclared_capability_is_refused() {
         // The grammar accepts this string, so only the manifest check
         // stands between a well-formed capability and a grant the
         // install dialog never showed the user.
-        let (state, _dir) = state_with(vec![plugin("a.b", &["db.read.any"], &[])]);
+        let Some((state, _dir)) = state_with(vec![plugin("a.b", &["db.read.any"], &[])]).await
+        else {
+            println!("SKIPPED: bundled fbclient not found");
+            return;
+        };
         let err = state
             .grant_declared("a.b", "db.write.any")
+            .await
             .expect_err("undeclared capability must be refused");
         assert!(err.contains("does not declare"), "unhelpful error: {err}");
         assert!(state.grants().granted_for("a.b").is_empty());
     }
 
-    #[test]
-    fn an_unknown_plugin_is_refused() {
-        let (state, _dir) = state_with(Vec::new());
+    #[tokio::test]
+    async fn an_unknown_plugin_is_refused() {
+        let Some((state, _dir)) = state_with(Vec::new()).await else {
+            println!("SKIPPED: bundled fbclient not found");
+            return;
+        };
         let err = state
             .grant_declared("ghost", "db.read.any")
+            .await
             .expect_err("unknown plugin must be refused");
         assert!(err.contains("unknown plugin"), "unhelpful error: {err}");
+    }
+
+    #[tokio::test]
+    async fn a_revoked_capability_stops_being_granted() {
+        // The read cache is what every plugin call consults, so a
+        // revoke that reaches the database and not the cache would
+        // leave the plugin holding a capability the user withdrew.
+        let Some((state, _dir)) =
+            state_with(vec![plugin("a.b", &["db.read.any"], &["net.https"])]).await
+        else {
+            println!("SKIPPED: bundled fbclient not found");
+            return;
+        };
+        state
+            .grant_declared("a.b", "db.read.any")
+            .await
+            .expect("grant");
+        state
+            .grants()
+            .revoke("a.b", "db.read.any")
+            .await
+            .expect("revoke");
+        assert!(state.grants().granted_for("a.b").is_empty());
+    }
+
+    #[tokio::test]
+    async fn grants_are_read_back_from_the_database_on_open() {
+        // What the boot path depends on: the cache is filled from the
+        // database rather than starting empty, or every restart would
+        // silently un-grant everything the user ever approved.
+        let dir = tempdir().expect("tempdir");
+        let Some(fbclient) = bundled_fbclient() else {
+            println!("SKIPPED: bundled fbclient not found");
+            return;
+        };
+        let meta = Arc::new(
+            MetaStore::open(dir.path().join("meta.fdb"), Some(fbclient))
+                .await
+                .expect("open metadata database"),
+        );
+
+        let first = GrantStore::open(meta.clone()).await.expect("first open");
+        first.grant("a.b", "db.read.any").await.expect("grant");
+
+        let reopened = GrantStore::open(meta).await.expect("second open");
+        assert_eq!(
+            reopened.granted_for("a.b"),
+            std::collections::HashSet::from(["db.read.any".to_string()]),
+        );
+    }
+
+    #[tokio::test]
+    async fn an_ungrammatical_capability_never_reaches_the_database() {
+        let dir = tempdir().expect("tempdir");
+        let Some(fbclient) = bundled_fbclient() else {
+            println!("SKIPPED: bundled fbclient not found");
+            return;
+        };
+        let meta = Arc::new(
+            MetaStore::open(dir.path().join("meta.fdb"), Some(fbclient))
+                .await
+                .expect("open metadata database"),
+        );
+        let store = GrantStore::open(meta).await.expect("open");
+
+        store
+            .grant("a.b", "not a capability")
+            .await
+            .expect_err("grammar must be checked before the write");
+        assert!(store.granted_for("a.b").is_empty());
     }
 }
 

@@ -161,10 +161,9 @@ pub async fn db_execute(
                         QueryResult::Rows { rows, .. } => Some(rows.len() as i64),
                         QueryResult::Affected { rows } => Some(*rows as i64),
                     };
-                    if let Err(e) =
-                        history
-                            .record(pid, &sql, duration_ms, "ok", None, row_count, history_limit)
-                            .await
+                    if let Err(e) = history
+                        .record(pid, &sql, duration_ms, "ok", None, row_count, history_limit)
+                        .await
                     {
                         tracing::warn!(?e, "history record failed");
                     }
@@ -181,13 +180,13 @@ pub async fn db_execute(
                 if let Some(pid) = profile_id {
                     if let Err(e) = history
                         .record(
-                        pid,
-                        &sql,
-                        duration_ms,
-                        "err",
-                        Some(&error_text),
-                        None,
-                        history_limit,
+                            pid,
+                            &sql,
+                            duration_ms,
+                            "err",
+                            Some(&error_text),
+                            None,
+                            history_limit,
                         )
                         .await
                     {
@@ -249,7 +248,10 @@ pub async fn history_list(
 }
 
 #[tauri::command]
-pub async fn history_clear(history: State<'_, HistoryStore>, profile_id: String) -> Result<u64, String> {
+pub async fn history_clear(
+    history: State<'_, HistoryStore>,
+    profile_id: String,
+) -> Result<u64, String> {
     history.clear(&profile_id).await
 }
 
@@ -268,7 +270,9 @@ pub async fn history_set_label(
     history: State<'_, HistoryStore>,
     request: HistorySetLabelRequest,
 ) -> Result<bool, String> {
-    history.set_label(request.id, request.label.as_deref()).await
+    history
+        .set_label(request.id, request.label.as_deref())
+        .await
 }
 
 #[tauri::command]

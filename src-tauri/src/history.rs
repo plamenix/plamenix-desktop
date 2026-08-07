@@ -16,6 +16,7 @@
 //! to [`HistoryStore::record`]; `clear` is the user's escape hatch.
 
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use plamenix_meta::{MetaStore, NewHistoryEntry};
 use plamenix_types::HistoryEntry;
@@ -26,28 +27,35 @@ use plamenix_types::HistoryEntry;
 /// because the underlying driver is; the SQLite version was
 /// synchronous, which is why the command handlers gained `.await`.
 pub struct HistoryStore {
-    meta: MetaStore,
+    meta: Arc<MetaStore>,
 }
 
 impl HistoryStore {
     /// Opens — creating on first run — the metadata database.
     ///
+    /// Returns the store behind an `Arc` because it is shared: plugin
+    /// grants and the audit log live in the same file, and Firebird's
+    /// embedded engine takes that file exclusively. One open per
+    /// process is not an optimisation, it is the only thing that works.
+    ///
     /// # Errors
     ///
     /// A human-readable message when the database cannot be opened,
-    /// including the case where another Plamenix instance holds it:
-    /// Firebird's embedded engine takes the file exclusively.
-    pub async fn open(path: &Path, fbclient_path: Option<String>) -> Result<Self, String> {
+    /// including the case where another Plamenix instance holds it.
+    pub async fn open(
+        path: &Path,
+        fbclient_path: Option<String>,
+    ) -> Result<Arc<MetaStore>, String> {
         MetaStore::open(path, fbclient_path)
             .await
-            .map(|meta| Self { meta })
+            .map(Arc::new)
             .map_err(|err| err.to_string())
     }
 
-    /// The shared store, for anything else that needs it.
+    /// Wraps an already-open metadata database.
     #[must_use]
-    pub const fn meta(&self) -> &MetaStore {
-        &self.meta
+    pub const fn new(meta: Arc<MetaStore>) -> Self {
+        Self { meta }
     }
 
     /// Records one statement, then trims the profile to `limit`.

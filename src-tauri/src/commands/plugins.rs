@@ -16,12 +16,12 @@ pub fn plugin_list_active(state: State<'_, PluginsState>) -> Vec<ActivePlugin> {
     skip(state),
     fields(plugin = %plugin_id, permission = %permission),
 )]
-pub fn plugin_grant_permission(
+pub async fn plugin_grant_permission(
     state: State<'_, PluginsState>,
     plugin_id: String,
     permission: String,
 ) -> Result<Vec<ActivePlugin>, String> {
-    state.grant_declared(&plugin_id, &permission)?;
+    state.grant_declared(&plugin_id, &permission).await?;
     state.rebuild_permission_view();
     Ok(state.snapshot())
 }
@@ -32,12 +32,12 @@ pub fn plugin_grant_permission(
     skip(state),
     fields(plugin = %plugin_id, permission = %permission),
 )]
-pub fn plugin_revoke_permission(
+pub async fn plugin_revoke_permission(
     state: State<'_, PluginsState>,
     plugin_id: String,
     permission: String,
 ) -> Result<Vec<ActivePlugin>, String> {
-    state.grants().revoke(&plugin_id, &permission)?;
+    state.grants().revoke(&plugin_id, &permission).await?;
     state.rebuild_permission_view();
     Ok(state.snapshot())
 }

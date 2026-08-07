@@ -13,10 +13,7 @@ use boot::{BootStep, bring_to_front, emit_step, finish};
 use db::DbState;
 use history::{HistoryStore, default_history_path};
 use plamenix_plugin_host::PluginHost;
-use plugins::{
-    GrantStore, PluginsState, bootstrap as plugin_bootstrap, default_grants_path,
-    resolve_plugins_root,
-};
+use plugins::{GrantStore, PluginsState, bootstrap as plugin_bootstrap, resolve_plugins_root};
 use profiles::{ProfilesState, SERVICE};
 use semver::Version;
 use std::sync::Arc;
@@ -90,15 +87,22 @@ pub fn run() {
             // command that touches history needs the store present in
             // managed state before the window can call one, and the
             // window opens as soon as setup returns.
-            let history_store = tauri::async_runtime::block_on(HistoryStore::open(
+            let meta = tauri::async_runtime::block_on(HistoryStore::open(
                 &history_path,
                 crate::fbclient::bundled_path(&app.handle().clone())
                     .map(|p| p.to_string_lossy().into_owned()),
             ))
             .map_err(|err| format!("open metadata database: {err}"))?;
-            app.manage(history_store);
+            app.manage(HistoryStore::new(meta.clone()));
 
-            let grants_store = Arc::new(GrantStore::open(default_grants_path(&app_config_dir)));
+            // Same store, same file. Grants used to be a JSON sidecar
+            // here while the web edition kept them in a database; one
+            // implementation now, and the read cache is filled before
+            // the window can ask a plugin what it may do.
+            let grants_store = Arc::new(
+                tauri::async_runtime::block_on(GrantStore::open(meta))
+                    .map_err(|err| format!("load plugin grants: {err}"))?,
+            );
             let plugins_state = PluginsState::new(grants_store.clone());
             app.manage(plugins_state);
 
