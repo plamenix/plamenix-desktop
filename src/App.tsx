@@ -33,9 +33,11 @@ import {
   registerBuiltinDefaultKeybindings,
   useConnectionActions,
   useShellCommands,
+  resolveStatement,
+  firstRows,
+  firstAffected,
   type ConnectionAdapter,
   registerBuiltinPluginSettings,
-  editorSavingChain,
   installPluginInterceptors,
   installDestructiveDropInterceptor,
   setConfirmationProvider,
@@ -49,7 +51,6 @@ import {
   emitEditorSelectionChanged,
   exportStartingChain,
   newExportId,
-  queryExecutingChain,
   schemaActionApplyingChain,
   useGlobalKeybindings,
   useConnectionPrefs,
@@ -1005,27 +1006,16 @@ export function App() {
     const tabId = activeTabId;
     const tab = activeTab;
     if (!tab.sessionId) return;
-    const sqlAtSend = tab.sql;
-    const editorDecision = await editorSavingChain.run({
+    const decision = await resolveStatement({
       tabId,
       sessionId: tab.sessionId,
-      sql: sqlAtSend,
+      sql: tab.sql,
     });
-    if (editorDecision.action === 'cancel') {
-      patchTab(tabId, { error: editorDecision.reason });
+    if (decision.action === 'cancel') {
+      patchTab(tabId, { error: decision.reason });
       return;
     }
-    const sqlAfterEditor = editorDecision.action === 'replace' ? editorDecision.ctx.sql : sqlAtSend;
-    const queryDecision = await queryExecutingChain.run({
-      tabId,
-      sessionId: tab.sessionId,
-      sql: sqlAfterEditor,
-    });
-    if (queryDecision.action === 'cancel') {
-      patchTab(tabId, { error: queryDecision.reason });
-      return;
-    }
-    const sql = queryDecision.action === 'replace' ? queryDecision.ctx.sql : sqlAfterEditor;
+    const sql = decision.sql;
     const key = recentKeyOf(tab.form, tab.profileName);
     const startedAt = Date.now();
     patchTab(tabId, { error: null, busy: true });
@@ -1074,16 +1064,7 @@ export function App() {
             historyLimit: currentHistoryLimit(),
           },
         });
-        const first = outcomes[0];
-        if (!first) {
-          throw new Error('UPDATE produced no outcome.');
-        }
-        if (first.status === 'err') {
-          throw new Error(first.error);
-        }
-        if ('Affected' in first.result && first.result.Affected.rows === 0) {
-          throw new Error('UPDATE matched zero rows.');
-        }
+        firstAffected(outcomes, 'UPDATE');
         notifyMutations(outcomes);
         recordExec(key, sql, startedAt, outcomes, null);
       } catch (err) {
@@ -1263,16 +1244,11 @@ export function App() {
           historyLimit: currentHistoryLimit(),
         },
       });
-      const first = outcomes[0];
-      if (!first) throw new Error(`No outcome for ${table.name}.`);
-      if (first.status === 'err') throw new Error(`${table.name}: ${first.error}`);
-      if (!('Rows' in first.result)) {
-        throw new Error(`${table.name}: SELECT did not return rows.`);
-      }
+      const { columns, rows } = firstRows(outcomes, table.name);
       return {
         table,
-        columns: first.result.Rows.columns,
-        rows: first.result.Rows.rows,
+        columns,
+        rows,
       };
     },
     [activeTab],
@@ -1335,13 +1311,7 @@ export function App() {
           profileId: null,
         },
       });
-      const first = outcomes[0];
-      if (!first) throw new Error('Scoped fetch produced no outcome.');
-      if (first.status === 'err') throw new Error(first.error);
-      if (!('Rows' in first.result)) {
-        throw new Error('Scoped fetch did not return rows.');
-      }
-      return first.result.Rows.rows;
+      return firstRows(outcomes, 'Scoped fetch').rows;
     },
     [activeTab],
   );
