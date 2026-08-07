@@ -14,8 +14,8 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use plamenix_plugin_host::{
-    ActivationOutcome, EpochTicker, EventBus, HostState, InstanceRegistry, LogLevel, Permission,
-    ExtensionPoint, Interception, InterceptorRegistration, InterceptorRegistry, PluginError,
+    ActivationOutcome, EpochTicker, EventBus, ExtensionPoint, HostState, InstanceRegistry,
+    Interception, InterceptorRegistration, InterceptorRegistry, LogLevel, Permission, PluginError,
     PluginHost, RecordedLog, RestartPolicy, SidebarPanel, SupervisedDelivery, Supervisor,
     activate_into_registry, dispatch_event_supervised, load, run_chain,
 };
@@ -121,6 +121,14 @@ pub struct PluginsState {
     supervisor: Arc<Supervisor>,
     /// Which plugins asked to be consulted before an operation commits.
     interceptors: Arc<InterceptorRegistry>,
+    /// Per-plugin session slots.
+    ///
+    /// A plugin's `db` imports act on the session the host called it
+    /// for, and the store hides its own state once instantiated, so the
+    /// shell keeps an `Arc` to the same slot and writes through it
+    /// before dispatching. Desktop is single-tenant, but the plugin
+    /// still needs to be told *which tab* it is acting for.
+    sessions: Mutex<HashMap<String, plamenix_plugin_host::SessionSlot>>,
 }
 
 impl PluginsState {
@@ -133,6 +141,7 @@ impl PluginsState {
             bus: Arc::new(EventBus::new()),
             supervisor: Arc::new(Supervisor::new()),
             interceptors: Arc::new(InterceptorRegistry::new()),
+            sessions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -159,6 +168,31 @@ impl PluginsState {
 
     pub fn interceptors(&self) -> Arc<InterceptorRegistry> {
         Arc::clone(&self.interceptors)
+    }
+
+    /// Points every activated plugin at the session the user is working
+    /// in.
+    ///
+    /// Called before dispatching anything that a plugin might answer
+    /// with a database call. Without it `db.current-session` is always
+    /// `None` and every `db` import refuses, which is what the desktop
+    /// edition did until now — it never wired a session slot at all.
+    pub fn set_session(&self, session_id: Option<&str>) {
+        let Ok(slots) = self.sessions.lock() else {
+            return;
+        };
+        for slot in slots.values() {
+            if let Ok(mut current) = slot.lock() {
+                *current = session_id.map(ToOwned::to_owned);
+            }
+        }
+    }
+
+    /// Registers the slot a plugin's store reads from.
+    fn track_session_slot(&self, plugin_id: &str, slot: plamenix_plugin_host::SessionSlot) {
+        if let Ok(mut slots) = self.sessions.lock() {
+            slots.insert(plugin_id.to_owned(), slot);
+        }
     }
 
     /// Runs every plugin registered for `point` and returns the chain's
@@ -355,6 +389,9 @@ pub async fn bootstrap(
     bus: &EventBus,
     supervisor: &Supervisor,
     interceptors: &InterceptorRegistry,
+    services: &Arc<dyn plamenix_plugin_host::HostServices>,
+    plugin_data_root: &Path,
+    sessions: &Mutex<HashMap<String, plamenix_plugin_host::SessionSlot>>,
 ) -> Vec<ActivePlugin> {
     let mut out = Vec::new();
 
@@ -384,6 +421,9 @@ pub async fn bootstrap(
             bus,
             supervisor,
             interceptors,
+            services,
+            plugin_data_root,
+            sessions,
         )
         .await
         {
@@ -405,13 +445,43 @@ async fn load_and_activate(
     bus: &EventBus,
     supervisor: &Supervisor,
     interceptors: &InterceptorRegistry,
+    services: &Arc<dyn plamenix_plugin_host::HostServices>,
+    plugin_data_root: &Path,
+    sessions: &Mutex<HashMap<String, plamenix_plugin_host::SessionSlot>>,
 ) -> Result<ActivePlugin, PluginError> {
     let staged = load(host, host_version, bundle)?;
     let manifest = staged.manifest.clone();
 
     let log_sink: Arc<Mutex<Vec<RecordedLog>>> = Arc::new(Mutex::new(Vec::new()));
+
+    // The plugin's own corner of the filesystem. Created up front so
+    // `fs` and `settings` have somewhere to resolve against; a plugin
+    // that never writes anything simply leaves it empty.
+    let data_dir = plugin_data_root.join(&manifest.plugin.id);
+    if let Err(err) = std::fs::create_dir_all(&data_dir) {
+        tracing::warn!(
+            plugin = %manifest.plugin.id,
+            ?err,
+            "could not create the plugin's data directory; its fs and settings imports will fail",
+        );
+    }
+
+    // Shared with the shell so the session a plugin acts on can be
+    // updated from outside the store, which hides its own state once
+    // instantiated.
+    let session_slot: plamenix_plugin_host::SessionSlot = Arc::new(Mutex::new(None));
+    if let Ok(mut slots) = sessions.lock() {
+        slots.insert(manifest.plugin.id.clone(), Arc::clone(&session_slot));
+    }
+
     let state = HostState::new(&manifest.plugin.id, host_version.to_string())
-        .with_log_sink(log_sink.clone());
+        .with_log_sink(log_sink.clone())
+        .with_edition("desktop")
+        .with_services(Arc::clone(services))
+        .with_world(manifest.plugin.world_tier)
+        .with_declared_permissions(manifest.permissions.clone())
+        .with_session_slot(Arc::clone(&session_slot))
+        .with_data_dir(&data_dir);
 
     // Registers the live store rather than dropping it when `activate`
     // returns. A failed activation is not registered — the activator

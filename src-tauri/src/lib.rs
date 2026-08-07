@@ -3,6 +3,7 @@ mod commands;
 mod db;
 mod fbclient;
 mod history;
+mod plugin_services;
 mod plugins;
 mod profiles;
 
@@ -26,6 +27,8 @@ pub fn run() {
     let result = tauri::Builder::default()
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_opener::init())
+        .plugin(tauri_plugin_clipboard_manager::init())
+        .plugin(tauri_plugin_notification::init())
         .manage(DbState::new())
         .invoke_handler(tauri::generate_handler![
             commands::ping,
@@ -141,6 +144,32 @@ pub fn run() {
                                     ),
                                 ),
                             };
+                        // What plugins can actually reach. Until this
+                        // existed every host import beyond logging
+                        // refused, because the host had no way to the
+                        // driver, the keyring, or the window.
+                        // The same driver the Tauri commands use. It is
+                        // `Arc`-backed, so this clone shares the session
+                        // registry rather than starting an empty one —
+                        // a second driver would see none of the user's
+                        // connections.
+                        let driver_for_plugins = handle
+                            .try_state::<DbState>()
+                            .map(|state| state.driver().clone())
+                            .unwrap_or_default();
+                        let services: std::sync::Arc<
+                            dyn plamenix_plugin_host::HostServices,
+                        > = std::sync::Arc::new(
+                            crate::plugin_services::DesktopHostServices::new(
+                                driver_for_plugins,
+                                std::sync::Arc::clone(&grants_store),
+                                std::sync::Arc::new(plamenix_secrets::KeyringStore::new()),
+                                handle.clone(),
+                            ),
+                        );
+                        let plugin_data_root = app_config_dir.join("plugin-data");
+                        let sessions_holder =
+                            std::sync::Mutex::new(std::collections::HashMap::new());
                         let active = plugin_bootstrap(
                             &host,
                             &host_version,
@@ -150,6 +179,9 @@ pub fn run() {
                             &bus,
                             &supervisor,
                             &interceptors,
+                            &services,
+                            &plugin_data_root,
+                            &sessions_holder,
                         )
                         .await;
                         let count = active.len();

@@ -207,6 +207,11 @@ pub async fn db_execute(
         "sessionId": session_id.0.to_string(),
     })
     .to_string();
+    // Point every plugin at the session this event came from before
+    // dispatching. A plugin that reacts by querying the database asks
+    // about "the session the host called me for", and without this that
+    // is always `None` and every `db` import refuses.
+    plugins.set_session(Some(&session_id.0.to_string()));
     let deliveries = plugins.emit_event("db/query/executed", &payload).await;
     if !deliveries.is_empty() {
         tracing::debug!(
