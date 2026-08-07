@@ -299,8 +299,14 @@ impl PluginsState {
 }
 
 /// On-disk grant store. JSON file: `{ "<plugin_id>": ["perm1", ...] }`.
-/// Lives next to `profiles.json` and `history.sqlite` under the
+/// Lives next to `profiles.json` and `plamenix-meta.fdb` under the
 /// app config directory.
+///
+/// Note the asymmetry: the web edition keeps its grants in the
+/// metadata database, this edition still keeps them here. Two
+/// implementations of one thing, which is the duplication the metadata
+/// database exists to end — `plamenix_meta` already has the grant
+/// calls this would move onto.
 pub struct GrantStore {
     path: PathBuf,
     state: Mutex<HashMap<String, HashSet<String>>>,
