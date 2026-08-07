@@ -32,6 +32,7 @@ import {
   getModKeyLabel,
   registerBuiltinDefaultKeybindings,
   useConnectionActions,
+  useShellCommands,
   type ConnectionAdapter,
   registerBuiltinPluginSettings,
   editorSavingChain,
@@ -67,7 +68,6 @@ import {
   type ExtensionPoint,
   type PluginInterceptorOutcome,
   type ColumnValue,
-  type Command,
   type DatabaseStats,
   type DdlSourceKind,
   type HistoryEntry,
@@ -104,22 +104,10 @@ import {
 import {
   ChartLine as ChartLineIcon,
   FileTerminal as SqlEditorIcon,
-  History,
   Info as InfoIcon,
   LogOut as LogOutIcon,
   Plug as PluginsIcon,
   Settings as SettingsIcon,
-  Keyboard,
-  LogOut,
-  Moon,
-  PanelLeftClose,
-  Play,
-  Plug,
-  Plus,
-  RefreshCw,
-  Save,
-  Sun,
-  X,
 } from 'lucide-react';
 import { tauriTransport } from '@/transport/tauri';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
@@ -1805,133 +1793,25 @@ export function App() {
     return map;
   }, [tabs, themeMode]);
 
-  const commands = useMemo<Command[]>(() => {
-    const list: Command[] = [
-      {
-        id: 'new-tab',
-        label: 'New tab',
-        description: 'Open a fresh disconnected session',
-        icon: Plus,
-        shortcut: `${mod}T`,
-        group: 'Tabs',
-        run: () => newTab(),
-      },
-      {
-        id: 'close-tab',
-        label: 'Close tab',
-        description: 'Close the active session and tab',
-        icon: X,
-        shortcut: `${mod}W`,
-        group: 'Tabs',
-        run: () => handleTabClose(activeTabId),
-      },
-      {
-        id: 'toggle-theme',
-        label: `Switch to ${themeMode === 'dark' ? 'light' : 'dark'} theme`,
-        description: 'Flip the Plamenix theme',
-        icon: themeMode === 'dark' ? Sun : Moon,
-        group: 'Appearance',
-        run: () => toggleMode(),
-      },
-      {
-        id: 'toggle-sidebar',
-        label: 'Toggle schema sidebar',
-        description: 'Collapse or expand the schema browser',
-        icon: PanelLeftClose,
-        group: 'Appearance',
-        run: () => toggleSidebar(),
-      },
-      {
-        id: 'show-shortcuts',
-        label: 'Show keyboard shortcuts',
-        description: 'Cheat sheet of every shortcut Plamenix exposes',
-        icon: Keyboard,
-        shortcut: '?',
-        group: 'Help',
-        run: () => setShortcutsOpen(true),
-      },
-    ];
-
-    if (activeTab.sessionId === null) {
-      list.push(
-        {
-          id: 'save-profile',
-          label: 'Save connection profile',
-          description: 'Persist the current form values',
-          icon: Save,
-          shortcut: `${mod}S`,
-          group: 'Connection',
-          run: () => void handleSaveProfile(),
-        },
-        {
-          id: 'connect',
-          label: 'Connect',
-          description: 'Open a session against the current form',
-          icon: Plug,
-          shortcut: `${mod}↵`,
-          group: 'Connection',
-          run: () => void handleConnect(),
-        },
-      );
-    } else {
-      list.push(
-        {
-          id: 'execute',
-          label: 'Execute SQL',
-          description: 'Run the current editor buffer',
-          icon: Play,
-          shortcut: `${mod}↵`,
-          group: 'Session',
-          run: () => void handleExecute(),
-        },
-        {
-          id: 'refresh-schema',
-          label: 'Refresh schema',
-          description: 'Reload the table / view list',
-          icon: RefreshCw,
-          group: 'Session',
-          run: () => {
-            if (activeTab.sessionId) {
-              void refreshSchema(activeTabId, activeTab.sessionId);
-            }
-          },
-        },
-        {
-          id: 'disconnect',
-          label: 'Disconnect',
-          description: 'Close the active session',
-          icon: LogOut,
-          group: 'Session',
-          run: () => void handleDisconnect(),
-        },
-      );
-      if (activeTab.selectedProfileId !== null) {
-        list.push({
-          id: 'history',
-          label: 'Show query history',
-          description: 'Browse and replay statements run under this profile',
-          icon: History,
-          group: 'Session',
-          run: () => void openHistory(),
-        });
-      }
-    }
-    return list;
-  }, [
-    activeTab,
-    activeTabId,
-    handleConnect,
-    handleDisconnect,
-    handleExecute,
-    handleSaveProfile,
-    handleTabClose,
+  const commands = useShellCommands({
     mod,
-    newTab,
-    openHistory,
     themeMode,
-    toggleMode,
+    hasSession: activeTab.sessionId !== null,
+    hasProfile: activeTab.selectedProfileId !== null,
+    newTab: () => newTab(),
+    closeTab: () => handleTabClose(activeTabId),
+    toggleTheme: toggleMode,
     toggleSidebar,
-  ]);
+    showShortcuts: () => setShortcutsOpen(true),
+    saveProfile: () => void handleSaveProfile(),
+    connect: () => void handleConnect(),
+    execute: () => void handleExecute(),
+    refreshSchema: () => {
+      if (activeTab.sessionId) void refreshSchema(activeTabId, activeTab.sessionId);
+    },
+    disconnect: () => void handleDisconnect(),
+    openHistory: () => void openHistory(),
+  });
 
   return (
     <div className="flex h-full flex-col">
