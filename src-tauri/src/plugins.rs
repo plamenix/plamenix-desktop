@@ -15,8 +15,9 @@ use std::sync::{Arc, Mutex};
 
 use plamenix_plugin_host::{
     ActivationOutcome, EpochTicker, EventBus, HostState, InstanceRegistry, LogLevel, Permission,
-    PluginError, PluginHost, RecordedLog, RestartPolicy, SidebarPanel, SupervisedDelivery,
-    Supervisor, activate_into_registry, dispatch_event_supervised, load,
+    ExtensionPoint, Interception, InterceptorRegistration, InterceptorRegistry, PluginError,
+    PluginHost, RecordedLog, RestartPolicy, SidebarPanel, SupervisedDelivery, Supervisor,
+    activate_into_registry, dispatch_event_supervised, load, run_chain,
 };
 use semver::Version;
 use serde::{Deserialize, Serialize};
@@ -118,6 +119,8 @@ pub struct PluginsState {
     bus: Arc<EventBus>,
     /// Crash budget and restart policy per plugin.
     supervisor: Arc<Supervisor>,
+    /// Which plugins asked to be consulted before an operation commits.
+    interceptors: Arc<InterceptorRegistry>,
 }
 
 impl PluginsState {
@@ -129,6 +132,7 @@ impl PluginsState {
             ticker: Mutex::new(None),
             bus: Arc::new(EventBus::new()),
             supervisor: Arc::new(Supervisor::new()),
+            interceptors: Arc::new(InterceptorRegistry::new()),
         }
     }
 
@@ -151,6 +155,26 @@ impl PluginsState {
 
     pub fn supervisor(&self) -> Arc<Supervisor> {
         Arc::clone(&self.supervisor)
+    }
+
+    pub fn interceptors(&self) -> Arc<InterceptorRegistry> {
+        Arc::clone(&self.interceptors)
+    }
+
+    /// Runs every plugin registered for `point` and returns the chain's
+    /// verdict.
+    ///
+    /// The shell's TypeScript chain owns ordering against its own
+    /// built-in handlers and the 500ms budget; this is the plugin
+    /// segment of that chain, run in one call so the UI does not pay a
+    /// round trip per plugin.
+    pub async fn run_interceptors(
+        &self,
+        point: ExtensionPoint,
+        context_json: &str,
+    ) -> (plamenix_plugin_host::Verdict, Vec<Interception>) {
+        let registrations = self.interceptors.for_point(point).unwrap_or_default();
+        run_chain(&self.instances, &registrations, point, context_json).await
     }
 
     /// Starts the epoch ticker, if one is not already running.
@@ -330,6 +354,7 @@ pub async fn bootstrap(
     instances: &InstanceRegistry,
     bus: &EventBus,
     supervisor: &Supervisor,
+    interceptors: &InterceptorRegistry,
 ) -> Vec<ActivePlugin> {
     let mut out = Vec::new();
 
@@ -358,6 +383,7 @@ pub async fn bootstrap(
             instances,
             bus,
             supervisor,
+            interceptors,
         )
         .await
         {
@@ -378,6 +404,7 @@ async fn load_and_activate(
     instances: &InstanceRegistry,
     bus: &EventBus,
     supervisor: &Supervisor,
+    interceptors: &InterceptorRegistry,
 ) -> Result<ActivePlugin, PluginError> {
     let staged = load(host, host_version, bundle)?;
     let manifest = staged.manifest.clone();
@@ -407,6 +434,24 @@ async fn load_and_activate(
                     pattern,
                     %err,
                     "ignoring an event subscription the bus rejected",
+                );
+            }
+        }
+        // Interceptors are the control surface, so a plugin that failed
+        // to activate must never end up in a chain: it would be
+        // consulted about operations it cannot answer for.
+        for entry in &manifest.contributions.interceptors {
+            if let Err(err) = interceptors.register(InterceptorRegistration {
+                plugin_id: manifest.plugin.id.clone(),
+                point: entry.point,
+                priority: entry.priority,
+                purpose: entry.purpose.clone(),
+            }) {
+                tracing::warn!(
+                    plugin = %manifest.plugin.id,
+                    point = entry.point.as_str(),
+                    %err,
+                    "ignoring an interceptor the registry rejected",
                 );
             }
         }

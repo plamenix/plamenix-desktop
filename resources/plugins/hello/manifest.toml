@@ -13,9 +13,16 @@ description = "Smoke-test plugin. Contributes one sidebar panel and emits a sing
 author = "Plamenix"
 license = "MIT OR Apache-2.0"
 
+# None, and that is now enforceable rather than aspirational. This
+# manifest used to request `db.schema.list`, `os.notify`, and
+# `clipboard.read` while declaring `plugin-minimal`, whose whole point
+# is that it imports nothing but `host`. The plugin's code touches none
+# of them — it logs a line and reads the host version — so all three
+# were permissions the install dialog asked the user to approve for
+# imports the plugin could not reach.
 [permissions]
-required = ["db.schema.list"]
-optional = ["os.notify", "clipboard.read"]
+required = []
+optional = []
 
 [entry_points]
 wasm = "hello-plugin.wasm"

@@ -34,6 +34,7 @@ import {
   registerBuiltinPluginSettings,
   connectionOpeningChain,
   editorSavingChain,
+  installPluginInterceptors,
   installDestructiveDropInterceptor,
   setConfirmationProvider,
   type ConfirmationRequest,
@@ -63,6 +64,8 @@ import {
   useTabsStore,
   useThemeStore,
   type ActivePlugin,
+  type ExtensionPoint,
+  type PluginInterceptorOutcome,
   type ColumnValue,
   type Command,
   type DatabaseStats,
@@ -374,6 +377,36 @@ export function App() {
       if (unlisten) unlisten();
     };
   }, []);
+
+  // Wires activated plugins into the interceptor chains. Separate from
+  // the effect above because that one is about what the plugins panel
+  // displays; this one is about plugins being able to refuse or rewrite
+  // an operation, and it has to re-run whenever the set of activated
+  // plugins changes.
+  useEffect(() => {
+    let handle: { dispose(): void } | null = null;
+    let cancelled = false;
+    void installPluginInterceptors({
+      listInterceptors: () =>
+        tauriTransport.invoke<Array<{ extensionPoint: ExtensionPoint }>>(
+          'plugin_list_interceptors',
+        ),
+      runInterceptors: (extensionPoint, contextJson) =>
+        tauriTransport.invoke<PluginInterceptorOutcome>('plugin_run_interceptors', {
+          extensionPoint,
+          contextJson,
+        }),
+    }).then((installed) => {
+      // A reload that resolved after unmount would otherwise leave a
+      // handler registered against a chain nobody disposes.
+      if (cancelled) installed.dispose();
+      else handle = installed;
+    });
+    return () => {
+      cancelled = true;
+      handle?.dispose();
+    };
+  }, [plugins.length]);
 
   const handleGrantPermission = useCallback(async (pluginId: string, permission: string) => {
     try {

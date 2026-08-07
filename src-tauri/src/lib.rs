@@ -52,6 +52,8 @@ pub fn run() {
             commands::db::history_delete_many,
             commands::plugins::plugin_list_active,
             commands::plugins::plugin_grant_permission,
+            commands::plugins::plugin_list_interceptors,
+            commands::plugins::plugin_run_interceptors,
             commands::plugins::plugin_revoke_permission,
             commands::profiles::profile_list,
             commands::profiles::profile_save,
@@ -126,13 +128,19 @@ pub fn run() {
                         if let Some(state) = handle.try_state::<PluginsState>() {
                             state.start_epoch_ticker(&host);
                         }
-                        let (bus, supervisor) = match handle.try_state::<PluginsState>() {
-                            Some(state) => (state.bus(), state.supervisor()),
-                            None => (
-                                std::sync::Arc::new(plamenix_plugin_host::EventBus::new()),
-                                std::sync::Arc::new(plamenix_plugin_host::Supervisor::new()),
-                            ),
-                        };
+                        let (bus, supervisor, interceptors) =
+                            match handle.try_state::<PluginsState>() {
+                                Some(state) => {
+                                    (state.bus(), state.supervisor(), state.interceptors())
+                                }
+                                None => (
+                                    std::sync::Arc::new(plamenix_plugin_host::EventBus::new()),
+                                    std::sync::Arc::new(plamenix_plugin_host::Supervisor::new()),
+                                    std::sync::Arc::new(
+                                        plamenix_plugin_host::InterceptorRegistry::new(),
+                                    ),
+                                ),
+                            };
                         let active = plugin_bootstrap(
                             &host,
                             &host_version,
@@ -141,6 +149,7 @@ pub fn run() {
                             &instances,
                             &bus,
                             &supervisor,
+                            &interceptors,
                         )
                         .await;
                         let count = active.len();
