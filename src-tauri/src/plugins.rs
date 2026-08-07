@@ -188,13 +188,6 @@ impl PluginsState {
         }
     }
 
-    /// Registers the slot a plugin's store reads from.
-    fn track_session_slot(&self, plugin_id: &str, slot: plamenix_plugin_host::SessionSlot) {
-        if let Ok(mut slots) = self.sessions.lock() {
-            slots.insert(plugin_id.to_owned(), slot);
-        }
-    }
-
     /// Runs every plugin registered for `point` and returns the chain's
     /// verdict.
     ///
@@ -654,5 +647,85 @@ mod grant_scope_tests {
             .grant_declared("ghost", "db.read.any")
             .expect_err("unknown plugin must be refused");
         assert!(err.contains("unknown plugin"), "unhelpful error: {err}");
+    }
+}
+
+#[cfg(test)]
+mod bundled_manifest_tests {
+    //! The manifests we actually ship have to parse.
+    //!
+    //! Every other test in this repo stages a manifest it wrote itself,
+    //! so none of them can catch a mistake in `resources/plugins/`. That
+    //! gap is not hypothetical: the bundled `hello` plugin spent its
+    //! whole life declaring `db.schema.list`, `os.notify`, and
+    //! `clipboard.read` under a world that exposes none of them, asking
+    //! users to approve three permissions its code never touched, and
+    //! nothing failed.
+
+    use std::path::{Path, PathBuf};
+
+    use plamenix_plugin_host::Manifest;
+
+    fn resources() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("src-tauri has a parent")
+            .join("resources/plugins")
+    }
+
+    fn bundled() -> Vec<(String, Manifest)> {
+        std::fs::read_dir(resources())
+            .expect("resources/plugins is readable")
+            .flatten()
+            .filter(|entry| entry.path().is_dir())
+            .map(|entry| {
+                let name = entry.file_name().to_string_lossy().into_owned();
+                let text = std::fs::read_to_string(entry.path().join("manifest.toml"))
+                    .unwrap_or_else(|err| panic!("{name}: no manifest.toml ({err})"));
+                let manifest = Manifest::parse(&text)
+                    .unwrap_or_else(|err| panic!("{name}: manifest does not parse: {err}"));
+                (name, manifest)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn every_bundled_manifest_parses() {
+        // Parsing is where the world check, the capability grammar, and
+        // the capability-versus-world cross-check all run, so this one
+        // assertion covers more than it looks like.
+        let all = bundled();
+        assert!(!all.is_empty(), "no bundled plugins found");
+    }
+
+    #[test]
+    fn every_bundled_wasm_file_is_where_its_manifest_says() {
+        // A manifest naming a file that is not in the bundle fails at
+        // load with the plugin simply missing from the panel, which is
+        // a confusing way to find out about a typo.
+        for (name, manifest) in bundled() {
+            if let Some(wasm) = manifest.entry_points.wasm.as_ref() {
+                let path = resources().join(&name).join(wasm);
+                assert!(
+                    path.exists(),
+                    "{name}: {} is missing from the bundle",
+                    wasm.display(),
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn at_least_one_bundled_plugin_exercises_a_capability() {
+        // Otherwise the permissions panel has nothing to show and the
+        // whole capability model is invisible to anyone running the app
+        // — which was true until `table-count` shipped.
+        let any_declares = bundled()
+            .iter()
+            .any(|(_, manifest)| !manifest.permissions.required.is_empty());
+        assert!(
+            any_declares,
+            "no bundled plugin declares a capability; the permissions panel would be empty",
+        );
     }
 }
