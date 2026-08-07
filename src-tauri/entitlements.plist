@@ -1,0 +1,74 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  macOS hardened-runtime entitlements.
+
+  Without these the bundled app is killed on launch — SIGKILL, code
+  signature invalid, CODESIGNING/"Invalid Page" — the moment wasmtime
+  compiles a plugin component. Nothing in the crash report names
+  wasmtime or plugins, so the symptom is "the app does not start" and
+  the cause is four layers away.
+
+  It only bites the bundled build. `cargo run` produces a linker-signed
+  binary with no hardened runtime, so JIT is unrestricted there and
+  every test and dev run passes. `tauri build` sets the runtime flag,
+  and that flag is what turns JIT-compiled pages into a kill.
+
+  Both keys are needed, and this was determined by testing rather than
+  assumed:
+
+  - `allow-jit` permits MAP_JIT mappings. On its own it is NOT enough:
+    the app still died, because wasmtime does not use MAP_JIT — it maps
+    pages and then mprotects them executable.
+  - `allow-unsigned-executable-memory` is what permits that, and adding
+    it is what made the app start.
+
+  Both are kept. `allow-jit` costs nothing and is the entitlement a
+  future wasmtime would use if it moved to MAP_JIT, which is the
+  narrower and better-protected path of the two.
+
+  What this gives up: executable pages in this process are no longer
+  required to be signed. That is inherent to running a JIT at all, and
+  is the trade the plugin system makes by executing WebAssembly. The
+  sandbox around plugin code is wasmtime's — the memory limits, the
+  epoch deadlines, the capability-gated imports — not the platform's
+  page protection.
+
+  Deliberately NOT included: `disable-executable-page-protection`,
+  which switches the enforcement off process-wide rather than
+  permitting the specific thing that needs permitting.
+
+  ## Loading the bundled fbclient
+
+  The hardened runtime also turns on *library validation*, which only
+  loads libraries signed by the same Team ID as the process or by
+  Apple. The bundled `libfbclient.dylib` is ad-hoc signed with no team,
+  and so is this app, so dyld refuses it:
+
+      code signature ... not valid for use in process:
+      mapping process and mapped file (non-platform) have different
+      Team IDs
+
+  That surfaces as `profile_connect` failing for every profile using
+  the native driver — which is all of them by default — with nothing in
+  the message about signing.
+
+  `disable-library-validation` is the entitlement for this, and the
+  alternative is not better: signing the vendored Firebird libraries
+  with our own identity would mean re-signing a third-party binary on
+  every build to claim it is ours.
+
+  Same caveat as above about where the trust boundary actually is. The
+  fbclient we load is one we vendored into the bundle; it is not a
+  library a plugin or a user can substitute.
+-->
+<plist version="1.0">
+<dict>
+  <key>com.apple.security.cs.allow-jit</key>
+  <true/>
+  <key>com.apple.security.cs.allow-unsigned-executable-memory</key>
+  <true/>
+  <key>com.apple.security.cs.disable-library-validation</key>
+  <true/>
+</dict>
+</plist>

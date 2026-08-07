@@ -59,12 +59,13 @@
       "../resources/fbclient": "fbclient"
     },
     "category": "DeveloperTool",
-    "shortDescription": "Plamenix — Firebird IDE",
+    "shortDescription": "Plamenix \u2014 Firebird IDE",
     "longDescription": "Plamenix is an open-source IDE for Firebird databases.",
     "macOS": {
       "signingIdentity": "-",
       "hardenedRuntime": true,
-      "minimumSystemVersion": "11.0"
+      "minimumSystemVersion": "11.0",
+      "entitlements": "entitlements.plist"
     }
   }
 }
