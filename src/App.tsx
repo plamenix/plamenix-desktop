@@ -34,6 +34,7 @@ import {
   useConnectionActions,
   useShellCommands,
   resolveStatement,
+  dispatchSchemaDdl,
   firstRows,
   firstAffected,
   type ConnectionAdapter,
@@ -1389,64 +1390,26 @@ export function App() {
   const dispatchDdl = async (ddl: SchemaDdl): Promise<boolean> => {
     const tabId = activeTabId;
     const tab = activeTab;
-    if (ddl.autoExecute) {
-      if (!tab.sessionId) return false;
-      const key = recentKeyOf(tab.form, tab.profileName);
-      const startedAt = Date.now();
-      patchTab(tabId, { error: null, busy: true });
-      let executed = false;
-      try {
-        const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+    const key = recentKeyOf(tab.form, tab.profileName);
+    return dispatchSchemaDdl(ddl, {
+      sessionId: tab.sessionId,
+      execute: (sql) =>
+        tauriTransport.invoke<StatementOutcome[]>('db_execute', {
           request: {
             sessionId: tab.sessionId,
-            sql: ddl.sql,
+            sql,
             profileId: tab.selectedProfileId,
             historyLimit: currentHistoryLimit(),
           },
-        });
-        notifyMutations(res);
-        recordExec(key, ddl.sql, startedAt, res, null);
-        void refreshSchema(tabId, tab.sessionId);
-        executed = true;
-      } catch (err) {
-        patchTab(tabId, { error: String(err) });
-        recordExec(key, ddl.sql, startedAt, null, String(err));
-      } finally {
-        patchTab(tabId, { busy: false });
-      }
-      return executed;
-    }
-    if (!ddl.destructive) {
-      patchTab(tabId, { sql: ddl.sql });
-      return false;
-    }
-    if (!window.confirm(ddl.confirmPrompt ?? 'Run destructive statement?')) return false;
-    if (!tab.sessionId) return false;
-    const key = recentKeyOf(tab.form, tab.profileName);
-    const startedAt = Date.now();
-    patchTab(tabId, { error: null, busy: true, sql: ddl.sql });
-    let executed = false;
-    try {
-      const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
-        request: {
-          sessionId: tab.sessionId,
-          sql: ddl.sql,
-          profileId: tab.selectedProfileId,
-          historyLimit: currentHistoryLimit(),
-        },
-      });
-      patchTab(tabId, { results: res });
-      notifyMutations(res);
-      recordExec(key, ddl.sql, startedAt, res, null);
-      void refreshSchema(tabId, tab.sessionId);
-      executed = true;
-    } catch (err) {
-      patchTab(tabId, { error: String(err) });
-      recordExec(key, ddl.sql, startedAt, null, String(err));
-    } finally {
-      patchTab(tabId, { busy: false });
-    }
-    return executed;
+        }),
+      patch: (patch) => patchTab(tabId, patch),
+      record: (sql, startedAt, outcomes, error) =>
+        recordExec(key, sql, startedAt, outcomes, error),
+      refreshSchema: () => {
+        if (tab.sessionId) void refreshSchema(tabId, tab.sessionId);
+      },
+      confirm: (prompt) => window.confirm(prompt),
+    });
   };
 
   const handleSchemaAction = async (action: SchemaAction) => {
