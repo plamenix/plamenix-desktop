@@ -1004,6 +1004,7 @@ export function App() {
       void refreshCryptState(tabId, response.sessionId);
       void refreshSchema(tabId, response.sessionId);
       void refreshEngineVersion(tabId, response.sessionId);
+      void refreshTxStatus(tabId, response.sessionId);
     } catch (err) {
       patchTab(tabId, { error: String(err) });
     } finally {
