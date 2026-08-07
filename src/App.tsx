@@ -31,8 +31,9 @@ import {
   ShortcutsCheatSheet,
   getModKeyLabel,
   registerBuiltinDefaultKeybindings,
+  useConnectionActions,
+  type ConnectionAdapter,
   registerBuiltinPluginSettings,
-  connectionOpeningChain,
   editorSavingChain,
   installPluginInterceptors,
   installDestructiveDropInterceptor,
@@ -59,7 +60,6 @@ import {
   useEmitSettingsThemeEvents,
   useEmitTabEvents,
   useResolvedThemeMode,
-  useHealthProbe,
   useRecentQueries,
   useTabsStore,
   useThemeStore,
@@ -908,193 +908,80 @@ export function App() {
     }
   };
 
-  const handleTestConnection = async () => {
-    const tabId = activeTabId;
-    const tab = activeTab;
-    patchTab(tabId, { testing: true, testResult: null });
-    try {
-      const res = await tauriTransport.invoke<TestConnectionResult>('db_test_connection', {
-        request: {
-          host: tab.form.host,
-          port: tab.form.port,
-          database: tab.form.database,
-          user: tab.form.user,
-          password: tab.form.password,
-          encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-          encryptionRequired: tab.form.encryptionRequired,
-          pureRust: tab.form.pureRust,
-          fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-          charset: tab.form.charset === '' ? null : tab.form.charset,
-        },
-      });
-      patchTab(tabId, { testResult: res });
-    } catch (err) {
-      patchTab(tabId, {
-        testResult: {
-          ok: false,
-          firebirdVersion: null,
-          error: String(err),
-          durationMs: 0,
-        },
-      });
-    } finally {
-      patchTab(tabId, { testing: false });
-    }
-  };
+  // Connect, reconnect, test, the health probe and auto-reconnect all
+  // live in `@plamenix/ui` now — the web shell ran a near-identical copy
+  // of every one of them, and one of the two had already drifted. What
+  // stays here is the part that is genuinely this edition's: Tauri
+  // command names, and `null` rather than `undefined` for an absent
+  // optional field.
+  const connectionAdapter = useMemo<ConnectionAdapter>(
+    () => ({
+      connect: ({ form, profileId }) =>
+        profileId !== null
+          ? tauriTransport.invoke<ConnectResponse>('profile_connect', {
+              request: {
+                profileId,
+                password: form.password === '' ? null : form.password,
+                encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+                pureRust: form.pureRust,
+                encryptionRequired: form.encryptionRequired,
+                fbclientPath: form.fbclientPath === '' ? null : form.fbclientPath,
+                charset: form.charset === '' ? null : form.charset,
+                embedded: form.embedded,
+              },
+            })
+          : tauriTransport.invoke<ConnectResponse>('db_connect', {
+              request: {
+                host: form.host,
+                port: form.port,
+                database: form.database,
+                user: form.user,
+                password: form.password,
+                encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+                encryptionRequired: form.encryptionRequired,
+                pureRust: form.pureRust,
+                fbclientPath: form.fbclientPath === '' ? null : form.fbclientPath,
+                charset: form.charset === '' ? null : form.charset,
+                embedded: form.embedded,
+              },
+            }),
+      testConnection: (form) =>
+        tauriTransport.invoke<TestConnectionResult>('db_test_connection', {
+          request: {
+            host: form.host,
+            port: form.port,
+            database: form.database,
+            user: form.user,
+            password: form.password,
+            encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+            encryptionRequired: form.encryptionRequired,
+            pureRust: form.pureRust,
+            fbclientPath: form.fbclientPath === '' ? null : form.fbclientPath,
+            charset: form.charset === '' ? null : form.charset,
+          },
+        }),
+      pingSession: (sessionId) => tauriTransport.invoke<string>('db_ping', { sessionId }),
+    }),
+    [],
+  );
 
-  const handleConnect = async () => {
-    const tabId = activeTabId;
-    const tab = activeTab;
-    const decision = await connectionOpeningChain.run({
-      tabId,
-      profileId: tab.selectedProfileId,
-      host: tab.form.host,
-      port: tab.form.port,
-      database: tab.form.database,
-      user: tab.form.user,
-      pureRust: tab.form.pureRust,
-      encryptionRequired: tab.form.encryptionRequired,
-      charset: tab.form.charset,
-    });
-    if (decision.action === 'cancel') {
-      patchTab(tabId, { error: decision.reason });
-      return;
-    }
-    patchTab(tabId, { error: null, busy: true, cryptState: null });
-    try {
-      let response: ConnectResponse;
-      if (tab.selectedProfileId !== null) {
-        response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
-          request: {
-            profileId: tab.selectedProfileId,
-            password: tab.form.password === '' ? null : tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            pureRust: tab.form.pureRust,
-            encryptionRequired: tab.form.encryptionRequired,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-            embedded: tab.form.embedded,
-          },
-        });
-      } else {
-        response = await tauriTransport.invoke<ConnectResponse>('db_connect', {
-          request: {
-            host: tab.form.host,
-            port: tab.form.port,
-            database: tab.form.database,
-            user: tab.form.user,
-            password: tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            encryptionRequired: tab.form.encryptionRequired,
-            pureRust: tab.form.pureRust,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-            embedded: tab.form.embedded,
-          },
-        });
-      }
-      patchTab(tabId, {
-        sessionId: response.sessionId,
-        results: null,
-        health: 'healthy',
-        lastPingAt: Date.now(),
-        connectedAt: Date.now(),
-      });
-      renameTab(tabId, tab.profileName.trim() || deriveTitle(tab.form));
-      void refreshCryptState(tabId, response.sessionId);
-      void refreshSchema(tabId, response.sessionId);
-      void refreshEngineVersion(tabId, response.sessionId);
-      void refreshTxStatus(tabId, response.sessionId);
-    } catch (err) {
-      patchTab(tabId, { error: String(err) });
-    } finally {
-      patchTab(tabId, { busy: false });
-    }
-  };
-
-  const handleReconnect = useCallback(async () => {
-    const tabId = activeTabId;
-    const tab = activeTab;
-    if (tab.health === 'reconnecting') return;
-    patchTab(tabId, { health: 'reconnecting', error: null });
-    try {
-      let response: ConnectResponse;
-      if (tab.selectedProfileId !== null) {
-        response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
-          request: {
-            profileId: tab.selectedProfileId,
-            password: tab.form.password === '' ? null : tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            pureRust: tab.form.pureRust,
-            encryptionRequired: tab.form.encryptionRequired,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-            embedded: tab.form.embedded,
-          },
-        });
-      } else {
-        response = await tauriTransport.invoke<ConnectResponse>('db_connect', {
-          request: {
-            host: tab.form.host,
-            port: tab.form.port,
-            database: tab.form.database,
-            user: tab.form.user,
-            password: tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            encryptionRequired: tab.form.encryptionRequired,
-            pureRust: tab.form.pureRust,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-            embedded: tab.form.embedded,
-          },
-        });
-      }
-      patchTab(tabId, {
-        sessionId: response.sessionId,
-        health: 'healthy',
-        lastPingAt: Date.now(),
-        connectedAt: Date.now(),
-      });
-      void tauriTransport
-        .invoke<string>('db_ping', { sessionId: response.sessionId })
-        .then((version) =>
-          patchTab(tabId, {
-            engineVersion: version.trim().length > 0 ? version.trim() : null,
-          }),
-        )
-        .catch(() => patchTab(tabId, { engineVersion: null }));
-    } catch (err) {
-      patchTab(tabId, { health: 'dead', error: String(err) });
-    }
-  }, [activeTab, activeTabId, patchTab]);
-
-  useHealthProbe({
+  const autoReconnect = useConnectionPrefs((s) => s.autoReconnect);
+  const { handleConnect, handleReconnect, handleTestConnection } = useConnectionActions({
+    adapter: connectionAdapter,
+    activeTab,
     tabs,
-    ping: (sessionId) => tauriTransport.invoke<string>('db_ping', { sessionId }),
-    onPatch: (tabId, patch) => patchTab(tabId, patch),
+    patchTab,
+    renameTab,
+    deriveTitle,
+    autoReconnect,
+    onConnected: (tabId, sessionId) => {
+      void refreshCryptState(tabId, sessionId);
+      void refreshSchema(tabId, sessionId);
+      void refreshEngineVersion(tabId, sessionId);
+      void refreshTxStatus(tabId, sessionId);
+    },
   });
 
-  // Auto-reconnect: when a tab's health probe trips to `dead`, fire a
-  // single reconnect attempt automatically. `lastAutoDeadRef` gates
-  // retries to one per dead transition per tab so a failing attach
-  // does not loop. Manual reconnect always clears the gate the next
-  // time the tab returns to healthy.
-  const autoReconnect = useConnectionPrefs((s) => s.autoReconnect);
-  const lastAutoDeadRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!autoReconnect) {
-      lastAutoDeadRef.current = null;
-      return;
-    }
-    if (activeTab.health !== 'dead') {
-      lastAutoDeadRef.current = null;
-      return;
-    }
-    if (activeTab.busy) return;
-    if (lastAutoDeadRef.current === activeTab.id) return;
-    lastAutoDeadRef.current = activeTab.id;
-    void handleReconnect();
-  }, [activeTab.health, activeTab.busy, activeTab.id, autoReconnect, handleReconnect]);
 
   const refreshCryptState = async (tabId: string, sessionId: string) => {
     try {
