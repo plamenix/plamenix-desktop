@@ -40,9 +40,9 @@ plamenix-db = { path = "../../plamenix-core/crates/plamenix-db", default-feature
 plamenix-profiles = { path = "../../plamenix-core/crates/plamenix-profiles" }
 plamenix-secrets = { path = "../../plamenix-core/crates/plamenix-secrets" }
 plamenix-plugin-host = { path = "../../plamenix-core/crates/plamenix-plugin-host" }
+plamenix-meta = { path = "../../plamenix-core/crates/plamenix-meta" }
 plamenix-tracing = { path = "../../plamenix-core/crates/plamenix-tracing", features = ["otlp"] }
 semver = "1"
-rusqlite = { version = "0.32", features = ["bundled"] }
 uuid = { version = "1", features = ["v4"] }
 async-trait = "0.1"
 

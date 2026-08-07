@@ -86,8 +86,16 @@ pub fn run() {
             let profiles_path = app_config_dir.join("profiles.json");
             app.manage(ProfilesState::new(profiles_path, SERVICE));
             let history_path = default_history_path(&app_config_dir);
-            let history_store = HistoryStore::open(&history_path)
-                .map_err(|err| format!("open history store: {err}"))?;
+            // Blocking here rather than in the async boot task: every
+            // command that touches history needs the store present in
+            // managed state before the window can call one, and the
+            // window opens as soon as setup returns.
+            let history_store = tauri::async_runtime::block_on(HistoryStore::open(
+                &history_path,
+                crate::fbclient::bundled_path(&app.handle().clone())
+                    .map(|p| p.to_string_lossy().into_owned()),
+            ))
+            .map_err(|err| format!("open metadata database: {err}"))?;
             app.manage(history_store);
 
             let grants_store = Arc::new(GrantStore::open(default_grants_path(&app_config_dir)));

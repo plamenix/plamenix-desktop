@@ -162,7 +162,9 @@ pub async fn db_execute(
                         QueryResult::Affected { rows } => Some(*rows as i64),
                     };
                     if let Err(e) =
-                        history.record(pid, &sql, duration_ms, "ok", None, row_count, history_limit)
+                        history
+                            .record(pid, &sql, duration_ms, "ok", None, row_count, history_limit)
+                            .await
                     {
                         tracing::warn!(?e, "history record failed");
                     }
@@ -177,7 +179,8 @@ pub async fn db_execute(
                 let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let error_text = err.to_string();
                 if let Some(pid) = profile_id {
-                    if let Err(e) = history.record(
+                    if let Err(e) = history
+                        .record(
                         pid,
                         &sql,
                         duration_ms,
@@ -185,7 +188,9 @@ pub async fn db_execute(
                         Some(&error_text),
                         None,
                         history_limit,
-                    ) {
+                        )
+                        .await
+                    {
                         tracing::warn!(?e, "history record failed");
                     }
                 }
@@ -236,16 +241,16 @@ fn default_history_limit() -> i64 {
 }
 
 #[tauri::command]
-pub fn history_list(
+pub async fn history_list(
     history: State<'_, HistoryStore>,
     request: HistoryListRequest,
 ) -> Result<Vec<HistoryEntry>, String> {
-    history.list(&request.profile_id, request.limit)
+    history.list(&request.profile_id, request.limit).await
 }
 
 #[tauri::command]
-pub fn history_clear(history: State<'_, HistoryStore>, profile_id: String) -> Result<u64, String> {
-    history.clear(&profile_id)
+pub async fn history_clear(history: State<'_, HistoryStore>, profile_id: String) -> Result<u64, String> {
+    history.clear(&profile_id).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -259,16 +264,16 @@ pub struct HistorySetLabelRequest {
 }
 
 #[tauri::command]
-pub fn history_set_label(
+pub async fn history_set_label(
     history: State<'_, HistoryStore>,
     request: HistorySetLabelRequest,
 ) -> Result<bool, String> {
-    history.set_label(request.id, request.label.as_deref())
+    history.set_label(request.id, request.label.as_deref()).await
 }
 
 #[tauri::command]
-pub fn history_delete(history: State<'_, HistoryStore>, id: i64) -> Result<bool, String> {
-    history.delete(id)
+pub async fn history_delete(history: State<'_, HistoryStore>, id: i64) -> Result<bool, String> {
+    history.delete(id).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -278,11 +283,11 @@ pub struct HistoryDeleteManyRequest {
 }
 
 #[tauri::command]
-pub fn history_delete_many(
+pub async fn history_delete_many(
     history: State<'_, HistoryStore>,
     request: HistoryDeleteManyRequest,
 ) -> Result<u64, String> {
-    history.delete_many(&request.ids)
+    history.delete_many(&request.ids).await
 }
 
 #[tauri::command]
