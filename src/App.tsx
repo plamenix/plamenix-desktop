@@ -31,6 +31,8 @@ import {
   dispatchSchemaDdl,
   applySchemaAction,
   useSessionRefreshers,
+  quoteIdentifier,
+  countFromCell,
   runGuardedExport,
   ShellOverlays,
   appendIdentifier,
@@ -443,7 +445,7 @@ export function App() {
     const out: { name: string; kind: 'table' | 'view'; count: number | null; error?: string }[] =
       [];
     for (const t of tab.schema.tables) {
-      const ident = `"${t.name.replace(/"/g, '""')}"`;
+      const ident = quoteIdentifier(t.name);
       try {
         const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
           request: {
@@ -1128,15 +1130,15 @@ export function App() {
     async (table: TableInfo): Promise<TableExportPart> => {
       const tab = activeTab;
       if (!tab.sessionId) throw new Error('No active session.');
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table.name)
-        ? table.name
-        : `"${table.name.replace(/"/g, '""')}"`;
+      const quoted = quoteIdentifier(table.name);
       const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
         request: {
           sessionId: tab.sessionId,
           sql: `SELECT * FROM ${quoted}`,
-          profileId: tab.selectedProfileId,
-          historyLimit: currentHistoryLimit(),
+          // No `profileId`: this is the export dialog's own fetch, not
+          // something the user typed. Recording it would push their
+          // real statements out of a capped history, and the row it
+          // leaves behind is a `SELECT *` they never ran.
         },
       });
       const { columns, rows } = firstRows(outcomes, table.name);
@@ -1153,9 +1155,7 @@ export function App() {
     async ({ table, predicate }: { table: string; predicate: string | null }) => {
       const tab = activeTab;
       if (!tab.sessionId) throw new Error('No active session.');
-      // `quoteIdentBare` keeps existing all-upper identifiers bare (the
-      // Firebird-friendly form) and quotes lowercase/mixed names.
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table) ? table : `"${table.replace(/"/g, '""')}"`;
+      const quoted = quoteIdentifier(table);
       const sql = predicate
         ? `SELECT COUNT(*) FROM ${quoted} WHERE ${predicate}`
         : `SELECT COUNT(*) FROM ${quoted}`;
@@ -1163,30 +1163,12 @@ export function App() {
         request: {
           sessionId: tab.sessionId,
           sql,
-          profileId: tab.selectedProfileId,
-          historyLimit: currentHistoryLimit(),
+          // No `profileId`: a COUNT(*) helper is the UI answering its
+          // own question, not a statement the user issued.
         },
       });
-      const first = outcomes[0];
-      if (!first || first.status !== 'ok' || !('Rows' in first.result)) {
-        throw new Error('COUNT(*) did not return a row.');
-      }
-      const cell = first.result.Rows.rows[0]?.cells[0];
-      if (!cell) throw new Error('COUNT(*) returned an empty row.');
-      if (cell.type === 'integer') {
-        // Integers cross the wire as exact decimal text so a BIGINT
-        // survives the JSON hop. A row count is bounded by what the UI
-        // can page through, so narrowing it here is safe.
-        const parsed = Number(cell.value);
-        if (!Number.isFinite(parsed)) {
-          throw new Error(`COUNT(*) returned an unparseable value: ${cell.value}.`);
-        }
-        return parsed;
-      }
-      if (cell.type === 'float' && typeof cell.value === 'number') {
-        return cell.value;
-      }
-      throw new Error(`COUNT(*) returned an unexpected cell type: ${cell.type}.`);
+      const { rows } = firstRows(outcomes, 'COUNT(*)');
+      return countFromCell(rows[0]?.cells[0]);
     },
     [activeTab],
   );
@@ -1195,7 +1177,7 @@ export function App() {
     async ({ table, predicate }: { table: string; predicate: string | null }) => {
       const tab = activeTab;
       if (!tab.sessionId) throw new Error('No active session.');
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table) ? table : `"${table.replace(/"/g, '""')}"`;
+      const quoted = quoteIdentifier(table);
       const sql = predicate
         ? `SELECT * FROM ${quoted} WHERE ${predicate}`
         : `SELECT * FROM ${quoted}`;
