@@ -1,6 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  CommandPalette,
   ConfirmationModal,
   ConnectionScreen,
   ErrorBanner,
@@ -16,18 +15,15 @@ import {
   SchemaBrowser,
   SchemaEditorModal,
   SettingsPage,
-  SearchPalette,
   TableObjectView,
   RoutineObjectView,
   SqlEditorPage,
   StatsDashboard,
-  StatusBar,
   TabStrip,
   WelcomeDashboard,
   sourceQuery,
   swatchFor,
   resolveHistoryLimit,
-  ShortcutsCheatSheet,
   getModKeyLabel,
   registerBuiltinDefaultKeybindings,
   useConnectionActions,
@@ -36,6 +32,8 @@ import {
   dispatchSchemaDdl,
   applySchemaAction,
   useSessionRefreshers,
+  ShellOverlays,
+  appendIdentifier,
   profileToForm,
   firstRows,
   firstAffected,
@@ -1841,35 +1839,27 @@ export function App() {
           onBrowseTable={handleBrowseTable}
         />
       )}
-      <StatusBar
-        sessionId={activeTab.sessionId}
-        health={activeTab.health}
-        user={activeTab.form.user}
-        host={activeTab.form.host}
-        port={activeTab.form.port}
-        database={activeTab.form.database}
-        executedSql={activeTab.executedSql}
-        results={activeTab.results}
+      <ShellOverlays
+        tab={{
+          sessionId: activeTab.sessionId,
+          health: activeTab.health,
+          user: activeTab.form.user,
+          host: activeTab.form.host,
+          port: activeTab.form.port,
+          database: activeTab.form.database,
+          executedSql: activeTab.executedSql,
+          results: activeTab.results,
+          schema: activeTab.schema,
+        }}
         recentKey={recentKeyOf(activeTab.form, activeTab.profileName)}
-      />
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
         commands={commands}
-      />
-      <ShortcutsCheatSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
-      <SearchPalette
-        open={searchOpen}
-        schema={activeTab.schema}
-        onClose={() => setSearchOpen(false)}
-        onPick={(id) =>
-          patchTab(activeTabId, {
-            sql:
-              activeTab.sql.length > 0 && !activeTab.sql.endsWith(' ')
-                ? `${activeTab.sql} ${id}`
-                : `${activeTab.sql}${id}`,
-          })
-        }
+        paletteOpen={paletteOpen}
+        onPaletteClose={() => setPaletteOpen(false)}
+        shortcutsOpen={shortcutsOpen}
+        onShortcutsClose={() => setShortcutsOpen(false)}
+        searchOpen={searchOpen}
+        onSearchClose={() => setSearchOpen(false)}
+        onSearchPick={(id) => patchTab(activeTabId, { sql: appendIdentifier(activeTab.sql, id) })}
       />
       <HistoryPanel
         open={historyOpen}
