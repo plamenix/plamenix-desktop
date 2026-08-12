@@ -32,6 +32,7 @@ import {
   dispatchSchemaDdl,
   applySchemaAction,
   useSessionRefreshers,
+  runGuardedExport,
   ShellOverlays,
   appendIdentifier,
   profileToForm,
@@ -44,13 +45,8 @@ import {
   setConfirmationProvider,
   type ConfirmationRequest,
   type PendingConfirmation,
-  emitExportCompleted,
-  emitExportFailed,
-  emitExportStarted,
   emitEditorFocused,
   emitEditorSelectionChanged,
-  exportStartingChain,
-  newExportId,
   useGlobalKeybindings,
   useConnectionPrefs,
   useEmitConnectionEvents,
@@ -1056,117 +1052,77 @@ export function App() {
   );
 
   const handleStreamedExport: StreamedExportRunner = useCallback(
-    async (req: StreamedExportRequest): Promise<StreamedExportResult> => {
-      const exportId = newExportId();
-      const startedAt = Date.now();
-      const scopeLabel =
-        req.scope.kind === 'statement'
-          ? (req.scope.label ?? req.scope.table?.name ?? req.scope.sql.slice(0, 80))
-          : req.scope.tables.map((t) => t.name).join(', ');
-      const tables =
-        req.scope.kind === 'statement'
-          ? req.scope.table
-            ? [req.scope.table.name]
-            : []
-          : req.scope.tables.map((t) => t.name);
-      const exportDecision = await exportStartingChain.run({
+    async (req: StreamedExportRequest): Promise<StreamedExportResult> =>
+      runGuardedExport(req, {
         tabId: activeTab.id,
-        sessionId: req.sessionId,
-        format: req.format,
-        scopeKind: req.scope.kind,
-        scopeLabel,
-        tables,
-      });
-      if (exportDecision.action === 'cancel') {
-        throw new Error(exportDecision.reason);
-      }
-      emitExportStarted({
-        exportId,
-        tabId: activeTab.id,
-        sessionId: req.sessionId,
-        format: req.format,
-        scopeKind: req.scope.kind,
-        scopeLabel,
-        startedAt,
-      });
-      const { listen } = await import('@tauri-apps/api/event');
-      const chunks: string[] = [];
-      let resolveDone: (() => void) | null = null;
-      let rejectErr: ((err: Error) => void) | null = null;
-      const completion = new Promise<void>((resolve, reject) => {
-        resolveDone = resolve;
-        rejectErr = reject;
-      });
-      let expectedId: string | null = null;
-      const unsubs: (() => void)[] = [];
-      unsubs.push(
-        await listen<{ exportId: string; seq: number; text: string }>('export:chunk', (event) => {
-          if (expectedId === null || event.payload.exportId === expectedId) {
-            chunks[event.payload.seq] = event.payload.text;
+        // This edition streams the file back over Tauri events rather
+        // than in the command's response, so the subscriptions have to
+        // be live before the command is invoked.
+        transfer: async (request) => {
+          const { listen } = await import('@tauri-apps/api/event');
+          const chunks: string[] = [];
+          let resolveDone: (() => void) | null = null;
+          let rejectErr: ((err: Error) => void) | null = null;
+          const completion = new Promise<void>((resolve, reject) => {
+            resolveDone = resolve;
+            rejectErr = reject;
+          });
+          // The backend mints its own id and returns it; chunks are
+          // filtered on that rather than on the one the events carry.
+          let expectedId: string | null = null;
+          const unsubs: (() => void)[] = [];
+          unsubs.push(
+            await listen<{ exportId: string; seq: number; text: string }>(
+              'export:chunk',
+              (event) => {
+                if (expectedId === null || event.payload.exportId === expectedId) {
+                  chunks[event.payload.seq] = event.payload.text;
+                }
+              },
+            ),
+          );
+          unsubs.push(
+            await listen<{ exportId: string; totalBytes: number }>('export:done', (event) => {
+              if (expectedId === null || event.payload.exportId === expectedId) {
+                resolveDone?.();
+              }
+            }),
+          );
+          unsubs.push(
+            await listen<{ exportId: string; error: string }>('export:err', (event) => {
+              if (expectedId === null || event.payload.exportId === expectedId) {
+                rejectErr?.(new Error(event.payload.error));
+              }
+            }),
+          );
+          try {
+            expectedId = await tauriTransport.invoke<string>('db_export', {
+              request: {
+                sessionId: request.sessionId,
+                format: request.format,
+                csvDelimiter: request.csvDelimiter,
+                scope: request.scope,
+                includeDdl: request.includeDdl ?? true,
+              },
+            });
+            await completion;
+            const mime: Record<string, string> = {
+              csv: 'text/csv',
+              json: 'application/json',
+              sql: 'application/sql',
+              xml: 'application/xml',
+            };
+            const blob = new Blob([chunks.join('')], {
+              type: `${mime[request.format] ?? 'application/octet-stream'};charset=utf-8`,
+            });
+            const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+            return { blob, suggestedFilename: `plamenix-export-${stamp}.${request.format}` };
+          } finally {
+            for (const u of unsubs) u();
           }
-        }),
-      );
-      unsubs.push(
-        await listen<{ exportId: string; totalBytes: number }>('export:done', (event) => {
-          if (expectedId === null || event.payload.exportId === expectedId) {
-            resolveDone?.();
-          }
-        }),
-      );
-      unsubs.push(
-        await listen<{ exportId: string; error: string }>('export:err', (event) => {
-          if (expectedId === null || event.payload.exportId === expectedId) {
-            rejectErr?.(new Error(event.payload.error));
-          }
-        }),
-      );
-      try {
-        const csvDelimiter = req.csvDelimiter;
-        expectedId = await tauriTransport.invoke<string>('db_export', {
-          request: {
-            sessionId: req.sessionId,
-            format: req.format,
-            csvDelimiter,
-            scope: req.scope,
-            includeDdl: req.includeDdl ?? true,
-          },
-        });
-        await completion;
-        const body = chunks.join('');
-        const mime: Record<string, string> = {
-          csv: 'text/csv',
-          json: 'application/json',
-          sql: 'application/sql',
-          xml: 'application/xml',
-        };
-        const blob = new Blob([body], {
-          type: `${mime[req.format] ?? 'application/octet-stream'};charset=utf-8`,
-        });
-        const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
-        emitExportCompleted({
-          exportId,
-          durationMs: Date.now() - startedAt,
-          byteSize: blob.size,
-          rowCount: null,
-          completedAt: Date.now(),
-        });
-        return {
-          blob,
-          suggestedFilename: `plamenix-export-${stamp}.${req.format}`,
-        };
-      } catch (err) {
-        emitExportFailed({
-          exportId,
-          durationMs: Date.now() - startedAt,
-          error: err instanceof Error ? err.message : String(err),
-          failedAt: Date.now(),
-        });
-        throw err;
-      } finally {
-        for (const u of unsubs) u();
-      }
-    },
-    [],
+        },
+      }),
+    [activeTab.id],
   );
 
   const handleFetchTableExport = useCallback(
