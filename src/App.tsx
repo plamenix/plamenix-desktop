@@ -49,6 +49,7 @@ import {
   emitEditorFocused,
   emitEditorSelectionChanged,
   useDefaultKeybindings,
+  useBuiltinContributions,
   useConnectionPrefs,
   useEmitConnectionEvents,
   useEmitEditorEvents,
@@ -1414,6 +1415,11 @@ export function App() {
   // Per-plugin settings — 6 built-ins ship a runtime-configurable
   // panel that PluginsPage renders inline in the matching card.
   useEffect(() => registerBuiltinPluginSettings(), []);
+  // Every shipped built-in contribution, for the life of the shell.
+  // They used to register from inside the components that consumed
+  // them, which made a feature's availability depend on an unrelated
+  // component being mounted — the Format button was the visible case.
+  useBuiltinContributions();
   // After a webview reload (context-menu Reload, devtools refresh)
   // React state is wiped but the Rust-side wasmtime session may still
   // be alive. We persist sessionIds to **sessionStorage** (not
