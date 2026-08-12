@@ -36,6 +36,7 @@ import {
   dispatchSchemaDdl,
   applySchemaAction,
   useSessionRefreshers,
+  profileToForm,
   firstRows,
   firstAffected,
   type ConnectionAdapter,
@@ -775,19 +776,7 @@ export function App() {
       selectedProfileId: id,
       profileName: profile.name,
       profileColor: profile.color ?? null,
-      form: {
-        host: profile.host,
-        port: profile.port,
-        database: profile.database,
-        user: profile.user,
-        password: '',
-        pureRust: profile.pureRust,
-        encryptionKey: '',
-        encryptionRequired: profile.encryptionRequired,
-        fbclientPath: profile.fbclientPath ?? '',
-        charset: profile.charset ?? 'UTF8',
-        embedded: profile.embedded ?? false,
-      },
+      form: profileToForm(profile),
     });
   };
 
@@ -796,6 +785,10 @@ export function App() {
     const tab = activeTab;
     patchTab(tabId, { error: null, busy: true });
     try {
+      // Not the library's `formToDraft`: this edition stores the
+      // password and encryption key in the OS keyring, and the web
+      // edition deliberately keeps no secrets server-side, so the two
+      // payloads are different on purpose rather than by accident.
       const draft = {
         id: tab.selectedProfileId,
         name: tab.profileName.trim(),
@@ -848,53 +841,9 @@ export function App() {
   };
 
   const handleQuickConnect = async (profileId: string) => {
-    const tabId = activeTabId;
     const profile = profiles.find((p) => p.id === profileId);
     if (!profile) return;
-    patchTab(tabId, {
-      error: null,
-      busy: true,
-      cryptState: null,
-      selectedProfileId: profileId,
-      profileName: profile.name,
-      form: {
-        ...activeTab.form,
-        host: profile.host,
-        port: profile.port,
-        database: profile.database,
-        user: profile.user,
-        encryptionRequired: profile.encryptionRequired,
-        pureRust: profile.pureRust,
-      },
-    });
-    try {
-      const response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
-        request: {
-          profileId,
-          password: activeTab.form.password === '' ? null : activeTab.form.password,
-          encryptionKey: activeTab.form.encryptionKey === '' ? null : activeTab.form.encryptionKey,
-          pureRust: profile.pureRust,
-          encryptionRequired: profile.encryptionRequired,
-          fbclientPath: activeTab.form.fbclientPath === '' ? null : activeTab.form.fbclientPath,
-        },
-      });
-      patchTab(tabId, {
-        sessionId: response.sessionId,
-        results: null,
-        health: 'healthy',
-        lastPingAt: Date.now(),
-        connectedAt: Date.now(),
-      });
-      renameTab(tabId, profile.name);
-      void refreshCryptState(tabId, response.sessionId);
-      void refreshSchema(tabId, response.sessionId);
-      void refreshEngineVersion(tabId, response.sessionId);
-      void refreshTxStatus(tabId, response.sessionId);
-    } catch (err) {
-      patchTab(tabId, { error: String(err) });
-    } finally {
-      patchTab(tabId, { busy: false });
-    }
+    await quickConnect(profile);
   };
 
   // Connect, reconnect, test, the health probe and auto-reconnect all
@@ -955,7 +904,12 @@ export function App() {
   );
 
   const autoReconnect = useConnectionPrefs((s) => s.autoReconnect);
-  const { handleConnect, handleReconnect, handleTestConnection } = useConnectionActions({
+  const {
+    handleConnect,
+    handleReconnect,
+    handleTestConnection,
+    handleQuickConnect: quickConnect,
+  } = useConnectionActions({
     adapter: connectionAdapter,
     activeTab,
     tabs,
