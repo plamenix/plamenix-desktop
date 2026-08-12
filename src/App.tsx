@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ConfirmationModal,
   ConnectionScreen,
@@ -25,7 +25,6 @@ import {
   swatchFor,
   resolveHistoryLimit,
   getModKeyLabel,
-  registerBuiltinDefaultKeybindings,
   useConnectionActions,
   useShellCommands,
   resolveStatement,
@@ -47,7 +46,7 @@ import {
   type PendingConfirmation,
   emitEditorFocused,
   emitEditorSelectionChanged,
-  useGlobalKeybindings,
+  useDefaultKeybindings,
   useConnectionPrefs,
   useEmitConnectionEvents,
   useEmitEditorEvents,
@@ -1417,60 +1416,19 @@ export function App() {
   const toggleSidebar = useThemeStore((s) => s.toggleSidebar);
   const themeMode = useResolvedThemeMode();
 
-  const handlersRef = useRef({
-    newTab,
-    handleTabClose,
-    handleSaveProfile,
-    handleConnect,
-    handleExecute,
-    handleDisconnect,
-    refreshSchema,
-    toggleMode,
-    toggleSidebar,
-    setPaletteOpen,
-    setSearchOpen,
-    setShortcutsOpen,
-    activeTab,
-    activeTabId,
+  // The dispatcher and the six shell defaults live in `@plamenix/ui`.
+  // Handlers are passed directly: the hook owns the ref that keeps the
+  // once-registered bindings pointed at the current ones.
+  useDefaultKeybindings({
+    openCheatSheet: () => setShortcutsOpen(true),
+    openSearchPalette: () => setSearchOpen(true),
+    openCommandPalette: () => setPaletteOpen(true),
+    newTab: () => newTab(),
+    closeActiveTab: () => handleTabClose(activeTabId),
+    canSaveProfile: () =>
+      activeTab.sessionId === null && activeTab.profileName.trim() !== '' && !activeTab.busy,
+    saveActiveProfile: () => void handleSaveProfile(),
   });
-  handlersRef.current = {
-    newTab,
-    handleTabClose,
-    handleSaveProfile,
-    handleConnect,
-    handleExecute,
-    handleDisconnect,
-    refreshSchema,
-    toggleMode,
-    toggleSidebar,
-    setPaletteOpen,
-    setSearchOpen,
-    setShortcutsOpen,
-    activeTab,
-    activeTabId,
-  };
-
-  // I5.1 — keybindings now live in the registry. The dispatcher
-  // hook walks `keybindings` contributions in priority order on
-  // every keydown; the built-in `@plamenix-builtin/default-keybindings`
-  // registration below carries the six shell defaults that used to
-  // live in a 40-line inline switch here. Third-party plugins can
-  // override individual combos by registering at lower priority.
-  useGlobalKeybindings();
-  useEffect(() => {
-    return registerBuiltinDefaultKeybindings({
-      openCheatSheet: () => handlersRef.current.setShortcutsOpen(true),
-      openSearchPalette: () => handlersRef.current.setSearchOpen(true),
-      openCommandPalette: () => handlersRef.current.setPaletteOpen(true),
-      newTab: () => handlersRef.current.newTab(),
-      closeActiveTab: () => handlersRef.current.handleTabClose(handlersRef.current.activeTabId),
-      canSaveProfile: () => {
-        const t = handlersRef.current.activeTab;
-        return t.sessionId === null && t.profileName.trim() !== '' && !t.busy;
-      },
-      saveActiveProfile: () => void handlersRef.current.handleSaveProfile(),
-    });
-  }, []);
   // Per-plugin settings — 6 built-ins ship a runtime-configurable
   // panel that PluginsPage renders inline in the matching card.
   useEffect(() => registerBuiltinPluginSettings(), []);
