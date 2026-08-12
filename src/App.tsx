@@ -35,6 +35,7 @@ import {
   resolveStatement,
   dispatchSchemaDdl,
   applySchemaAction,
+  useSessionRefreshers,
   firstRows,
   firstAffected,
   type ConnectionAdapter,
@@ -971,35 +972,23 @@ export function App() {
   });
 
 
-  const refreshCryptState = async (tabId: string, sessionId: string) => {
-    try {
-      const state = await tauriTransport.invoke<CryptState>('db_crypt_state', { sessionId });
-      patchTab(tabId, { cryptState: state });
-    } catch {
-      patchTab(tabId, { cryptState: null });
-    }
-  };
+  const { refreshCryptState, refreshEngineVersion, refreshSchema, refreshTxStatus } =
+    useSessionRefreshers({
+      adapter: useMemo(
+        () => ({
+          cryptState: (sessionId) =>
+            tauriTransport.invoke<CryptState>('db_crypt_state', { sessionId }),
+          engineVersion: (sessionId) => tauriTransport.invoke<string>('db_ping', { sessionId }),
+          describeSchema: (sessionId) =>
+            tauriTransport.invoke<Schema>('db_describe_schema', { sessionId }),
+          transactionStatus: (sessionId) =>
+            tauriTransport.invoke<TxStatus>('db_transaction_status', { sessionId }),
+        }),
+        [],
+      ),
+      patchTab,
+    });
 
-  const refreshEngineVersion = async (tabId: string, sessionId: string) => {
-    try {
-      const version = await tauriTransport.invoke<string>('db_ping', { sessionId });
-      patchTab(tabId, {
-        engineVersion: version.trim().length > 0 ? version.trim() : null,
-        lastPingAt: Date.now(),
-      });
-    } catch {
-      patchTab(tabId, { engineVersion: null });
-    }
-  };
-
-  const refreshSchema = async (tabId: string, sessionId: string) => {
-    try {
-      const schema = await tauriTransport.invoke<Schema>('db_describe_schema', { sessionId });
-      patchTab(tabId, { schema });
-    } catch (err) {
-      patchTab(tabId, { error: String(err) });
-    }
-  };
 
   const handleExecute = async () => {
     const tabId = activeTabId;
@@ -1418,26 +1407,6 @@ export function App() {
       patch: (patch) => patchTab(activeTabId, patch),
     });
   };
-
-  /// Pulls the session's transaction state into the tab.
-  ///
-  /// Called after anything that can change it — connect, execute,
-  /// commit, rollback — so the indicator reflects the session rather
-  /// than what the UI last assumed.
-  const refreshTxStatus = useCallback(
-    async (tabId: string, sessionId: string) => {
-      try {
-        const status = await tauriTransport.invoke<TxStatus>('db_transaction_status', {
-          sessionId,
-        });
-        patchTab(tabId, { txStatus: status });
-      } catch {
-        // A status read failing is not worth surfacing on its own; the
-        // next real operation will report the underlying problem.
-      }
-    },
-    [patchTab],
-  );
 
   const handleSetTxMode = async (mode: TxMode, config: TxConfig) => {
     const tabId = activeTabId;
