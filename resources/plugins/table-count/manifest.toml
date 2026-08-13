@@ -43,4 +43,4 @@ wasm = "table-count.wasm"
 [contributions]
 # Runs after a statement completes, which is when the table count could
 # have changed.
-event_subscriptions = ["db/query/executed"]
+event_subscriptions = ["query/executed"]

@@ -216,11 +216,15 @@ pub async fn db_execute(
     // about "the session the host called me for", and without this that
     // is always `None` and every `db` import refuses.
     plugins.set_session(Some(&session_id.0.to_string()));
-    let deliveries = plugins.emit_event("db/query/executed", &payload).await;
+    // `query/executed` reaches plugins from the renderer now, carrying
+    // the full outcome batch rather than a statement count. Dispatching
+    // a second, thinner event from here would give subscribers the same
+    // fact twice under two names.
+    let deliveries = plugins.emit_event("query/executed", &payload).await;
     if !deliveries.is_empty() {
         tracing::debug!(
             subscribers = deliveries.len(),
-            "dispatched db/query/executed",
+            "dispatched query/executed",
         );
     }
 

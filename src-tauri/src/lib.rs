@@ -54,6 +54,8 @@ pub fn run() {
             commands::plugins::plugin_grant_permission,
             commands::plugins::plugin_list_interceptors,
             commands::plugins::plugin_run_interceptors,
+            commands::plugins::plugin_event_patterns,
+            commands::plugins::plugin_emit_event,
             commands::plugins::plugin_revoke_permission,
             commands::profiles::profile_list,
             commands::profiles::profile_save,

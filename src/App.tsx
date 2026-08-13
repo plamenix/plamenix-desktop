@@ -54,6 +54,7 @@ import {
   emitEditorSelectionChanged,
   useDefaultKeybindings,
   useBuiltinContributions,
+  usePluginEventForwarding,
   useConnectionPrefs,
   useEmitConnectionEvents,
   useEmitEditorEvents,
@@ -1456,6 +1457,28 @@ export function App() {
   // them, which made a feature's availability depend on an unrelated
   // component being mounted — the Format button was the visible case.
   useBuiltinContributions();
+
+  // Shell events reach WASM plugins from here. The host is asked which
+  // patterns anything subscribed to, so a topic nobody wants costs
+  // nothing — `editor/changed` fires as the user types.
+  const [pluginEventPatterns, setPluginEventPatterns] = useState<string[]>([]);
+  const refreshPluginEventPatterns = useCallback(() => {
+    void tauriTransport
+      .invoke<string[]>('plugin_event_patterns')
+      .then(setPluginEventPatterns)
+      .catch(() => setPluginEventPatterns([]));
+  }, []);
+  useEffect(refreshPluginEventPatterns, [refreshPluginEventPatterns]);
+  usePluginEventForwarding({
+    subscribedPatterns: pluginEventPatterns,
+    forward: (topic, payload) => {
+      void tauriTransport.invoke('plugin_emit_event', { topic, payload }).catch(() => {
+        // A plugin trapping on an event must not disturb the
+        // interaction that produced it; the supervisor records it.
+      });
+    },
+  });
+
   // After a webview reload (context-menu Reload, devtools refresh)
   // React state is wiped but the Rust-side wasmtime session may still
   // be alive. We persist sessionIds to **sessionStorage** (not

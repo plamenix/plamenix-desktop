@@ -1,4 +1,4 @@
-use plamenix_plugin_host::{ExtensionPoint, InterceptorRegistration, Verdict};
+use plamenix_plugin_host::{ExtensionPoint, InterceptorRegistration, RestartDecision, Verdict};
 use serde::Serialize;
 use tauri::State;
 
@@ -105,4 +105,55 @@ pub async fn plugin_run_interceptors(
         })
         .collect();
     Ok(InterceptorOutcome { verdict, skipped })
+}
+
+/// Which event patterns any plugin is currently subscribed to.
+///
+/// The renderer asks for this so it can forward only the events
+/// something actually wants. Most shell events originate in the UI — a
+/// tab opening, an editor gaining focus — so reaching a WASM plugin
+/// costs a command per event, and `editor/changed` fires as the user
+/// types. With nothing subscribed, the renderer sends nothing.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.plugin_event_patterns", skip(state))]
+pub fn plugin_event_patterns(state: State<'_, PluginsState>) -> Vec<String> {
+    state.bus().subscribed_patterns()
+}
+
+/// Dispatches a shell event to every plugin subscribed to its topic.
+///
+/// The renderer is the source: these events happen in the UI. Returns
+/// one entry per subscriber so a caller can see who was reached, and
+/// resolves rather than failing — a plugin trapping on an event must
+/// not fail the interaction that produced it.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.plugin_emit_event", skip(state, payload), fields(topic = %topic))]
+pub async fn plugin_emit_event(
+    state: State<'_, PluginsState>,
+    topic: String,
+    payload: String,
+) -> Result<Vec<PluginDelivery>, String> {
+    Ok(state
+        .emit_event(&topic, &payload)
+        .await
+        .into_iter()
+        .map(|delivery| PluginDelivery {
+            plugin_id: delivery.plugin_id,
+            status: format!("{:?}", delivery.outcome),
+            // Only `Disable` takes a plugin out of rotation; `Restart`
+            // and `Stop` are recoverable and the panel should not
+            // present them as the user's problem.
+            disabled: matches!(delivery.decision, Some(RestartDecision::Disable { .. })),
+        })
+        .collect())
+}
+
+/// One subscriber's outcome, flattened for the renderer.
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct PluginDelivery {
+    pub plugin_id: String,
+    pub status: String,
+    /// `true` when the supervisor took the plugin out of rotation.
+    pub disabled: bool,
 }
