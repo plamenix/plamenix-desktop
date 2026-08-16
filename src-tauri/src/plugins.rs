@@ -600,15 +600,28 @@ pub fn resolve_plugins_root(resource_dir: &Path) -> PathBuf {
     if bundled.exists() {
         return bundled;
     }
-    // Dev mode: walk up to plamenix-desktop/resources/plugins.
-    let candidate = resource_dir
-        .ancestors()
-        .find_map(|dir| {
+    #[cfg(debug_assertions)]
+    {
+        // Dev only: walk up to `plamenix-desktop/resources/plugins`,
+        // because `cargo tauri dev` runs from `target/debug` where the
+        // bundled directory does not exist.
+        //
+        // Compiled out of release builds deliberately. An installed app
+        // resolves its resource dir inside its own bundle, so a walk up
+        // from there passes through directories the user does not
+        // control the contents of — on macOS that is
+        // `/Applications` and `/` — and the first `resources/plugins`
+        // it found would be loaded and activated as trusted code. A
+        // release build with no bundled plugins directory should have
+        // no plugins, not somebody else's.
+        if let Some(found) = resource_dir.ancestors().find_map(|dir| {
             let p = dir.join("resources").join("plugins");
             if p.exists() { Some(p) } else { None }
-        })
-        .unwrap_or(bundled);
-    candidate
+        }) {
+            return found;
+        }
+    }
+    bundled
 }
 
 #[cfg(test)]
@@ -854,5 +867,53 @@ mod bundled_manifest_tests {
             any_declares,
             "no bundled plugin declares a capability; the permissions panel would be empty",
         );
+    }
+}
+
+#[cfg(test)]
+mod plugins_root_tests {
+    #![allow(clippy::unwrap_used, clippy::expect_used)]
+
+    use super::resolve_plugins_root;
+
+    #[test]
+    fn prefers_the_bundled_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let bundled = dir.path().join("plugins");
+        std::fs::create_dir_all(&bundled).unwrap();
+
+        assert_eq!(resolve_plugins_root(dir.path()), bundled);
+    }
+
+    #[test]
+    fn a_release_build_never_loads_plugins_from_outside_its_bundle() {
+        // An installed app resolves its resource dir inside its own
+        // bundle. Walking up from there passes through directories the
+        // user does not control — `/Applications`, `/` — and anything
+        // found is loaded and activated as trusted code.
+        //
+        // The walk is dev-only, so in a release build this must resolve
+        // to the bundled path even when a plausible-looking
+        // `resources/plugins` sits directly above it.
+        let dir = tempfile::tempdir().unwrap();
+        let planted = dir.path().join("resources").join("plugins");
+        std::fs::create_dir_all(&planted).unwrap();
+        let resource_dir = dir.path().join("Contents").join("Resources");
+        std::fs::create_dir_all(&resource_dir).unwrap();
+
+        let resolved = resolve_plugins_root(&resource_dir);
+
+        if cfg!(debug_assertions) {
+            // Dev builds want exactly this: `cargo tauri dev` runs from
+            // `target/debug`, where the bundled directory is absent.
+            assert_eq!(resolved, planted);
+        } else {
+            assert_eq!(
+                resolved,
+                resource_dir.join("plugins"),
+                "a release build resolved plugins outside its own bundle",
+            );
+            assert!(!resolved.exists(), "and the fallback should not exist");
+        }
     }
 }
