@@ -202,31 +202,18 @@ pub async fn db_execute(
             }
         }
     }
-    // The first host-originated event. Subscribers receive it through
-    // the same supervised path every future emit site will use, so a
-    // plugin that traps here consumes crash budget rather than failing
-    // the user's query.
-    let payload = serde_json::json!({
-        "statements": outcomes.len(),
-        "sessionId": session_id.0.to_string(),
-    })
-    .to_string();
-    // Point every plugin at the session this event came from before
-    // dispatching. A plugin that reacts by querying the database asks
-    // about "the session the host called me for", and without this that
-    // is always `None` and every `db` import refuses.
+    // Point every plugin at the session this batch ran against, before
+    // any event about it reaches them. A plugin that reacts by querying
+    // the database asks about "the session the host called me for", and
+    // without this that is always `None` and every `db` import refuses.
+    //
+    // The slot persists, which is what lets the renderer's
+    // `query/executed` — forwarded a moment later — find the right
+    // session. This command no longer dispatches that event itself: the
+    // renderer emits it with the sql, row count and duration, and
+    // dispatching a statement count under the same topic from here gave
+    // every subscriber the same fact twice in two different shapes.
     plugins.set_session(Some(&session_id.0.to_string()));
-    // `query/executed` reaches plugins from the renderer now, carrying
-    // the full outcome batch rather than a statement count. Dispatching
-    // a second, thinner event from here would give subscribers the same
-    // fact twice under two names.
-    let deliveries = plugins.emit_event("query/executed", &payload).await;
-    if !deliveries.is_empty() {
-        tracing::debug!(
-            subscribers = deliveries.len(),
-            "dispatched query/executed",
-        );
-    }
 
     Ok(outcomes)
 }
