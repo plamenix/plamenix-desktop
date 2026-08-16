@@ -132,7 +132,15 @@ pub async fn plugin_emit_event(
     state: State<'_, PluginsState>,
     topic: String,
     payload: String,
+    session_id: Option<String>,
 ) -> Result<Vec<PluginDelivery>, String> {
+    // Points subscribers at the session the event is about, so a plugin
+    // handling it can use the `db` capability it was granted. The
+    // execute path sets this too; an event that did not come from one
+    // would otherwise leave whatever the last statement set.
+    if let Some(session) = session_id.as_deref() {
+        state.set_session(Some(session));
+    }
     Ok(state
         .emit_event(&topic, &payload)
         .await

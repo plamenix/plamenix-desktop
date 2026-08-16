@@ -1471,8 +1471,10 @@ export function App() {
   useEffect(refreshPluginEventPatterns, [refreshPluginEventPatterns]);
   usePluginEventForwarding({
     subscribedPatterns: pluginEventPatterns,
-    forward: (topic, payload) => {
-      void tauriTransport.invoke('plugin_emit_event', { topic, payload }).catch(() => {
+    forward: (topic, payload, sessionId) => {
+      // The desktop backend also sets the slot on the execute path;
+      // passing it here covers the events that do not come from one.
+      void tauriTransport.invoke('plugin_emit_event', { topic, payload, sessionId }).catch(() => {
         // A plugin trapping on an event must not disturb the
         // interaction that produced it; the supervisor records it.
       });
