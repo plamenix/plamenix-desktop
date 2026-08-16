@@ -151,6 +151,14 @@ fn quote_table_ident(name: &str) -> String {
     }
 }
 
+/// Rows one export may carry, across every statement in it.
+///
+/// Matches the web edition's `EXPORT_MAX_ROWS` default. A million rows
+/// of anything is already a file nobody opens in a spreadsheet, and the
+/// alternative is an unbounded allocation driven by whatever the user
+/// pointed at.
+const DEFAULT_EXPORT_ROW_CAP: usize = 1_000_000;
+
 #[tauri::command]
 #[tracing::instrument(
     name = "db.export",
@@ -184,7 +192,24 @@ pub async fn db_export(
             .collect(),
     };
 
+    // Bounded at the producer, matching the web edition's
+    // `EXPORT_MAX_ROWS`. This edition had no cap at all: an export of a
+    // large table pulled every row into memory and then held the whole
+    // formatted document as a second copy before the first chunk was
+    // emitted. A desktop app has the user's whole machine to exhaust
+    // rather than a shared server, which makes it less visible, not
+    // less real.
+    let mut budget = DEFAULT_EXPORT_ROW_CAP;
     for (table, label, sql) in stmts {
+        // Capped in the statement so Firebird stops producing, rather
+        // than trimming rows the driver already materialised. Anything
+        // that cannot take a `ROWS` clause goes through unchanged and
+        // is trimmed below.
+        let sql = if plamenix_db::accepts_row_limit(&sql) {
+            plamenix_db::inject_row_limit(&sql, u32::try_from(budget).unwrap_or(u32::MAX))
+        } else {
+            sql
+        };
         let result = match driver.execute(session, sql).await {
             Ok(r) => r,
             Err(e) => {
@@ -212,8 +237,22 @@ pub async fn db_export(
     )> = Vec::with_capacity(owned.len());
     for (table, label, qr) in owned {
         match qr {
-            QueryResult::Rows { columns, rows, .. } => {
+            QueryResult::Rows {
+                columns, mut rows, ..
+            } => {
+                // The budget spans the whole export, not each statement:
+                // a hundred tables of ten thousand rows is the same
+                // memory as one table of a million. Trimmed here as well
+                // as capped in the statement, because a statement that
+                // could not take a `ROWS` clause arrives uncapped.
+                if rows.len() > budget {
+                    rows.truncate(budget);
+                }
+                budget -= rows.len();
                 row_payloads.push((table, label, columns, rows));
+                if budget == 0 {
+                    break;
+                }
             }
             QueryResult::Affected { .. } => {
                 // Skip non-row statements silently — they have no body
