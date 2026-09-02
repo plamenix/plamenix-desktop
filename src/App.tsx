@@ -247,7 +247,7 @@ function formatRelative(at: number, _tick: number): string {
 // I6 event-bus identity. Keep in sync with package.json version on
 // release-prep (no live import yet — vite JSON imports work but
 // require the workspace to expose package.json to the bundler).
-const HOST_VERSION = '1.0.0-beta.0';
+const HOST_VERSION = '1.0.0-beta';
 const EDITION = 'desktop' as const;
 
 export function App() {
@@ -348,7 +348,7 @@ export function App() {
     setShowPlugins(false);
     setShowSqlEditor(false);
   }, []);
-  const APP_VERSION = '1.0.0-beta.0';
+  const APP_VERSION = '1.0.0-beta';
 
   useEffect(() => {
     const fetchPlugins = async () => {
