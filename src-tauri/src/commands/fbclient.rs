@@ -44,8 +44,7 @@ pub async fn fbclient_download(
     version: Option<String>,
 ) -> Result<FbclientDownloadResult, String> {
     let release = match version.as_deref() {
-        Some(v) => find_release(v)
-            .ok_or_else(|| format!("unknown Firebird version: {v}"))?,
+        Some(v) => find_release(v).ok_or_else(|| format!("unknown Firebird version: {v}"))?,
         None => latest_release(),
     };
     let app_data_dir = app

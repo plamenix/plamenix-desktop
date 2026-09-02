@@ -13,7 +13,9 @@
 //! something to emit, so the frontend can wire the listener before
 //! the first chunk arrives.
 
-use plamenix_db::export::{format_csv, format_json, format_sql, format_xml, CsvDelimiter, ExportPart};
+use plamenix_db::export::{
+    CsvDelimiter, ExportPart, format_csv, format_json, format_sql, format_xml,
+};
 use plamenix_db::{DbDriver, QueryResult, SessionId};
 use plamenix_types::TableInfo;
 use serde::{Deserialize, Serialize};
@@ -149,6 +151,14 @@ fn quote_table_ident(name: &str) -> String {
     }
 }
 
+/// Rows one export may carry, across every statement in it.
+///
+/// Matches the web edition's `EXPORT_MAX_ROWS` default. A million rows
+/// of anything is already a file nobody opens in a spreadsheet, and the
+/// alternative is an unbounded allocation driven by whatever the user
+/// pointed at.
+const DEFAULT_EXPORT_ROW_CAP: usize = 1_000_000;
+
 #[tauri::command]
 #[tracing::instrument(
     name = "db.export",
@@ -182,14 +192,34 @@ pub async fn db_export(
             .collect(),
     };
 
+    // Bounded at the producer, matching the web edition's
+    // `EXPORT_MAX_ROWS`. This edition had no cap at all: an export of a
+    // large table pulled every row into memory and then held the whole
+    // formatted document as a second copy before the first chunk was
+    // emitted. A desktop app has the user's whole machine to exhaust
+    // rather than a shared server, which makes it less visible, not
+    // less real.
+    let mut budget = DEFAULT_EXPORT_ROW_CAP;
     for (table, label, sql) in stmts {
+        // Capped in the statement so Firebird stops producing, rather
+        // than trimming rows the driver already materialised. Anything
+        // that cannot take a `ROWS` clause goes through unchanged and
+        // is trimmed below.
+        let sql = if plamenix_db::accepts_row_limit(&sql) {
+            plamenix_db::inject_row_limit(&sql, u32::try_from(budget).unwrap_or(u32::MAX))
+        } else {
+            sql
+        };
         let result = match driver.execute(session, sql).await {
             Ok(r) => r,
             Err(e) => {
                 let err = e.to_string();
                 let _ = app.emit(
                     "export:err",
-                    ExportErr { export_id: export_id.clone(), error: err.clone() },
+                    ExportErr {
+                        export_id: export_id.clone(),
+                        error: err.clone(),
+                    },
                 );
                 return Err(err);
             }
@@ -199,11 +229,30 @@ pub async fn db_export(
 
     // Extract Rows variants up front so we can lend `&[Column]` /
     // `&[Row]` references to ExportPart without re-iterating.
-    let mut row_payloads: Vec<(Option<TableInfo>, Option<String>, Vec<plamenix_db::Column>, Vec<plamenix_db::Row>)> = Vec::with_capacity(owned.len());
+    let mut row_payloads: Vec<(
+        Option<TableInfo>,
+        Option<String>,
+        Vec<plamenix_db::Column>,
+        Vec<plamenix_db::Row>,
+    )> = Vec::with_capacity(owned.len());
     for (table, label, qr) in owned {
         match qr {
-            QueryResult::Rows { columns, rows, .. } => {
+            QueryResult::Rows {
+                columns, mut rows, ..
+            } => {
+                // The budget spans the whole export, not each statement:
+                // a hundred tables of ten thousand rows is the same
+                // memory as one table of a million. Trimmed here as well
+                // as capped in the statement, because a statement that
+                // could not take a `ROWS` clause arrives uncapped.
+                if rows.len() > budget {
+                    rows.truncate(budget);
+                }
+                budget -= rows.len();
                 row_payloads.push((table, label, columns, rows));
+                if budget == 0 {
+                    break;
+                }
             }
             QueryResult::Affected { .. } => {
                 // Skip non-row statements silently — they have no body
@@ -242,7 +291,10 @@ pub async fn db_export(
     }
     if let Err(err) = app.emit(
         "export:done",
-        ExportDone { export_id: export_id.clone(), total_bytes },
+        ExportDone {
+            export_id: export_id.clone(),
+            total_bytes,
+        },
     ) {
         tracing::warn!(?err, "failed to emit export:done");
     }

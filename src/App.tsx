@@ -1,8 +1,10 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
-  CommandPalette,
+  useToastStore,
+  copyText,
+  historyKeyOf,
+  ConfirmationModal,
   ConnectionScreen,
-  DdlViewerModal,
   ErrorBanner,
   HistoryPanel,
   MultiResultView,
@@ -10,36 +12,68 @@ import {
   NewObjectModal,
   ObjectListPage,
   PluginPanelModal,
-  PluginsSidebar,
   ToastViewport,
   notifyMutations,
   QueryPanel,
   SchemaBrowser,
   SchemaEditorModal,
-  SettingsButton,
   SettingsPage,
-  SearchPalette,
   TableObjectView,
+  RoutineObjectView,
+  SqlEditorPage,
   StatsDashboard,
-  StatusBar,
   TabStrip,
   WelcomeDashboard,
-  schemaDdl,
   sourceQuery,
   swatchFor,
   resolveHistoryLimit,
-  ShortcutsCheatSheet,
   getModKeyLabel,
-  isTypingTarget,
+  useConnectionActions,
+  useShellCommands,
+  resolveStatement,
+  dispatchSchemaDdl,
+  applySchemaAction,
+  useSessionRefreshers,
+  quoteIdentifier,
+  abandonStatement,
+  abandonNeedsConfirmation,
+  describeAbandonCost,
+  isStaleSession,
+  countFromCell,
+  runGuardedExport,
+  ShellOverlays,
+  appendIdentifier,
+  profileToForm,
+  firstRows,
+  firstAffected,
+  type ConnectionAdapter,
+  registerBuiltinPluginSettings,
+  installPluginInterceptors,
+  installDestructiveDropInterceptor,
+  setConfirmationProvider,
+  type ConfirmationRequest,
+  type PendingConfirmation,
+  emitEditorFocused,
+  emitEditorSelectionChanged,
+  useDefaultKeybindings,
+  useBuiltinContributions,
+  usePluginEventForwarding,
   useConnectionPrefs,
+  useEmitConnectionEvents,
+  useEmitEditorEvents,
+  useEmitLifecycleEvents,
+  useEmitQueryEvents,
+  useEmitSchemaEvents,
+  useEmitSettingsThemeEvents,
+  useEmitTabEvents,
   useResolvedThemeMode,
-  useHealthProbe,
   useRecentQueries,
   useTabsStore,
   useThemeStore,
   type ActivePlugin,
+  type ExtensionPoint,
+  type PluginInterceptorOutcome,
   type ColumnValue,
-  type Command,
   type DatabaseStats,
   type DdlSourceKind,
   type HistoryEntry,
@@ -52,6 +86,13 @@ import {
   type TableExportPart,
   type TableInfo,
   type ConnectionForm,
+  AboutPage,
+  AppMenu,
+  buildBuiltinActivePlugins,
+  decodeHex,
+  HomeButton,
+  HistoryButton,
+  PluginsPage,
   type CryptState,
   type Profile,
   type ListAliasesResult,
@@ -59,24 +100,25 @@ import {
   type StatementOutcome,
   type TabState,
   type SchemaAction,
+  type SchemaDdl,
   type TestConnectionResult,
+  TransactionBar,
+  hasUncommittedWork,
+  type TxConfig,
+  type TxMode,
+  type TxStatus,
 } from '@plamenix/ui';
 import {
-  History,
-  Keyboard,
-  LogOut,
-  Moon,
-  PanelLeftClose,
-  Play,
-  Plug,
-  Plus,
-  RefreshCw,
-  Save,
-  Sun,
-  X,
+  ChartLine as ChartLineIcon,
+  FileTerminal as SqlEditorIcon,
+  Info as InfoIcon,
+  LogOut as LogOutIcon,
+  Plug as PluginsIcon,
+  Settings as SettingsIcon,
 } from 'lucide-react';
 import { tauriTransport } from '@/transport/tauri';
 import { open as openDialog } from '@tauri-apps/plugin-dialog';
+import { openUrl } from '@tauri-apps/plugin-opener';
 
 interface ConnectResponse {
   sessionId: string;
@@ -101,6 +143,55 @@ function currentHistoryLimit(): number | null {
 function recentKeyOf(form: ConnectionForm, profileName: string): string {
   const trimmed = profileName.trim();
   return trimmed.length > 0 ? trimmed : deriveTitle(form);
+}
+
+/** Builds a fallback DDL note shown when Firebird returns NULL for an
+ *  object's `*_SOURCE` column. Common cause: the routine was compiled
+ *  into BLR (binary form) without preserving its text — the legacy
+ *  `employee.fdb` `GIVE_RAISE` procedure is the canonical example. */
+function synthesizeMissingSourceNote(
+  kind: DdlSourceKind,
+  name: string,
+  schema: Schema | null,
+): string {
+  const banner = [
+    `-- ${kind.toUpperCase()} ${name}`,
+    `--`,
+    `-- Source text is not stored in this database.`,
+    `-- RDB$${kind === 'view' ? 'RELATIONS.RDB$VIEW' : kind === 'trigger' ? 'TRIGGERS.RDB$TRIGGER' : 'PROCEDURES.RDB$PROCEDURE'}_SOURCE is NULL,`,
+    `-- so the body was compiled into BLR (binary form) without`,
+    `-- preserving the original text. This happens with older`,
+    `-- Firebird samples (employee.fdb), or backups restored from`,
+    `-- BLR-only \`.fbk\` files where source was stripped at backup.`,
+    `--`,
+  ];
+  if (kind === 'procedure') {
+    const proc = schema?.procedures?.find((p) => p.name === name);
+    if (proc) {
+      banner.push(
+        `-- Signature: ${proc.inputCount} input(s), ${proc.outputCount} output(s)`,
+        `--`,
+        `-- Invoke with:`,
+        proc.outputCount > 0
+          ? `--   SELECT * FROM "${name}"(<inputs>);`
+          : `--   EXECUTE PROCEDURE "${name}"(<inputs>);`,
+      );
+    }
+  } else if (kind === 'trigger') {
+    const trig = schema?.triggers?.find((t) => t.name === name);
+    if (trig) {
+      banner.push(
+        `-- Fires on: ${trig.relation ?? '<database>'}`,
+        `-- Active: ${trig.active ? 'YES' : 'NO'}`,
+      );
+    }
+  } else if (kind === 'view') {
+    const view = schema?.tables.find((t) => t.name === name && t.kind === 'view');
+    if (view) {
+      banner.push(`-- Columns: ${view.columns.length}`);
+    }
+  }
+  return banner.join('\n');
 }
 
 function recordExec(
@@ -153,7 +244,60 @@ function formatRelative(at: number, _tick: number): string {
   return `${hours}h ago`;
 }
 
+// I6 event-bus identity. Keep in sync with package.json version on
+// release-prep (no live import yet — vite JSON imports work but
+// require the workspace to expose package.json to the bundler).
+const HOST_VERSION = '1.0.0-beta.0';
+const EDITION = 'desktop' as const;
+
 export function App() {
+  // I6.3-I6.6 + I6.8 + I6.10 + I6.11 — mount the seven event-bridge
+  // hooks once at the App root. Each hook subscribes to its source
+  // store + diffs/emits on every relevant transition. Order is
+  // arbitrary; hooks are independent.
+  useEmitLifecycleEvents({ edition: EDITION, hostVersion: HOST_VERSION });
+  useEmitTabEvents();
+  useEmitConnectionEvents();
+  useEmitQueryEvents();
+  useEmitSchemaEvents();
+  useEmitSettingsThemeEvents();
+  useEmitEditorEvents();
+
+  // I6.12 — confirmation queue + provider + built-in destructive-DROP
+  // interceptor. The queue keeps multiple in-flight confirmations
+  // ordered; each user action resolves exactly one request.
+  const [confirmQueue, setConfirmQueue] = useState<
+    Array<PendingConfirmation & { resolve: (v: boolean) => void }>
+  >([]);
+  useEffect(() => {
+    setConfirmationProvider(
+      (req: ConfirmationRequest) =>
+        new Promise<boolean>((resolve) => {
+          setConfirmQueue((q) => [...q, { ...req, resolve }]);
+        }),
+    );
+    const dropReg = installDestructiveDropInterceptor();
+    return () => {
+      setConfirmationProvider(null);
+      dropReg.dispose();
+    };
+  }, []);
+  const confirmHead = confirmQueue[0] ?? null;
+  const onConfirmHead = useCallback(() => {
+    setConfirmQueue((q) => {
+      const [head, ...rest] = q;
+      head?.resolve(true);
+      return rest;
+    });
+  }, []);
+  const onCancelHead = useCallback(() => {
+    setConfirmQueue((q) => {
+      const [head, ...rest] = q;
+      head?.resolve(false);
+      return rest;
+    });
+  }, []);
+
   const tabs = useTabsStore((s) => s.tabs);
   const activeTabId = useTabsStore((s) => s.activeTabId);
   const newTab = useTabsStore((s) => s.newTab);
@@ -178,28 +322,46 @@ export function App() {
   const [statsFetchedAt, setStatsFetchedAt] = useState<number | null>(null);
   const [statsTick, setStatsTick] = useState(0);
 
-  const [ddlViewer, setDdlViewer] = useState<{
-    kind: DdlSourceKind;
-    name: string;
-    source: string | null;
-    loading: boolean;
-    error: string | null;
-  } | null>(null);
-
   const [plugins, setPlugins] = useState<ActivePlugin[]>([]);
   const [openPluginPanel, setOpenPluginPanel] = useState<{
     plugin: ActivePlugin;
     panel: SidebarPanelInfo;
   } | null>(null);
   const [showSettings, setShowSettings] = useState(false);
+  const [showPlugins, setShowPlugins] = useState(false);
+  const [showAbout, setShowAbout] = useState(false);
+  const [showSqlEditor, setShowSqlEditor] = useState(false);
+
+  /**
+   * Leaves whatever full-pane view is showing.
+   *
+   * Picking something in the schema sidebar is navigation, and
+   * navigation beats the page the user happens to be parked on. Without
+   * this the pane switch simply masked it: clicking a table while
+   * History was open set the tab's focused object and results and then
+   * rendered History over the top of them, so the sidebar looked dead.
+   */
+  const leaveCurrentPage = useCallback(() => {
+    setHistoryOpen(false);
+    setShowSettings(false);
+    setShowAbout(false);
+    setShowPlugins(false);
+    setShowSqlEditor(false);
+  }, []);
+  const APP_VERSION = '1.0.0-beta.0';
 
   useEffect(() => {
     const fetchPlugins = async () => {
+      // Built-ins are synchronous + always available, so they surface
+      // even if the Rust-side plugin host hasn't booted yet (e.g.
+      // bootstrap still running, or every wasm plugin failed to load).
+      const builtins = buildBuiltinActivePlugins();
       try {
         const list = await tauriTransport.invoke<ActivePlugin[]>('plugin_list_active');
-        setPlugins(list);
+        setPlugins([...builtins, ...list]);
       } catch {
-        // Plugins are best-effort; never block the shell on a load failure.
+        // Wasm-side fetch is best-effort; built-ins still surface.
+        setPlugins(builtins);
       }
     };
     // First fetch at mount in case the bootstrap already finished (e.g.
@@ -207,6 +369,13 @@ export function App() {
     // catches the cold-start race where the main window mounts before
     // the plugin bootstrap completes.
     void fetchPlugins();
+    // Built-ins land asynchronously — each lives behind a `useEffect`
+    // in its consumer component (ResultTable, SchemaBrowser, etc).
+    // A short deferred re-fetch picks them up once children mount,
+    // without needing to subscribe to every registry channel.
+    const builtinSettleTimeout = window.setTimeout(() => {
+      void fetchPlugins();
+    }, 800);
     let unlisten: (() => void) | null = null;
     void import('@tauri-apps/api/event').then(({ listen }) =>
       listen('boot:ready', () => {
@@ -216,9 +385,40 @@ export function App() {
       }),
     );
     return () => {
+      window.clearTimeout(builtinSettleTimeout);
       if (unlisten) unlisten();
     };
   }, []);
+
+  // Wires activated plugins into the interceptor chains. Separate from
+  // the effect above because that one is about what the plugins panel
+  // displays; this one is about plugins being able to refuse or rewrite
+  // an operation, and it has to re-run whenever the set of activated
+  // plugins changes.
+  useEffect(() => {
+    let handle: { dispose(): void } | null = null;
+    let cancelled = false;
+    void installPluginInterceptors({
+      listInterceptors: () =>
+        tauriTransport.invoke<Array<{ extensionPoint: ExtensionPoint }>>(
+          'plugin_list_interceptors',
+        ),
+      runInterceptors: (extensionPoint, contextJson) =>
+        tauriTransport.invoke<PluginInterceptorOutcome>('plugin_run_interceptors', {
+          extensionPoint,
+          contextJson,
+        }),
+    }).then((installed) => {
+      // A reload that resolved after unmount would otherwise leave a
+      // handler registered against a chain nobody disposes.
+      if (cancelled) installed.dispose();
+      else handle = installed;
+    });
+    return () => {
+      cancelled = true;
+      handle?.dispose();
+    };
+  }, [plugins.length]);
 
   const handleGrantPermission = useCallback(async (pluginId: string, permission: string) => {
     try {
@@ -250,24 +450,66 @@ export function App() {
     }
   }, []);
 
-  const refreshStats = useCallback(
-    async (sessionId: string) => {
-      setStatsLoading(true);
-      setStatsError(null);
+  const refreshStats = useCallback(async (sessionId: string) => {
+    setStatsLoading(true);
+    setStatsError(null);
+    try {
+      const next = await tauriTransport.invoke<DatabaseStats>('db_database_stats', {
+        sessionId,
+      });
+      setStats(next);
+      setStatsFetchedAt(Date.now());
+    } catch (err) {
+      setStatsError(String(err));
+    } finally {
+      setStatsLoading(false);
+    }
+  }, []);
+
+  const computeRowCounts = useCallback(async () => {
+    const tab = activeTab;
+    if (!tab.sessionId || !tab.schema) return [];
+    const out: { name: string; kind: 'table' | 'view'; count: number | null; error?: string }[] =
+      [];
+    for (const t of tab.schema.tables) {
+      const ident = quoteIdentifier(t.name);
       try {
-        const next = await tauriTransport.invoke<DatabaseStats>('db_database_stats', {
-          sessionId,
+        const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+          request: {
+            sessionId: tab.sessionId,
+            sql: `SELECT COUNT(*) FROM ${ident}`,
+            profileId: null,
+            historyLimit: 0,
+          },
         });
-        setStats(next);
-        setStatsFetchedAt(Date.now());
+        const first = outcomes[0];
+        if (!first || first.status === 'err' || !('Rows' in first.result)) {
+          out.push({
+            name: t.name,
+            kind: t.kind === 'view' ? 'view' : 'table',
+            count: null,
+            error: first?.status === 'err' ? first.error : 'count produced no row',
+          });
+          continue;
+        }
+        const cell = first.result.Rows.rows[0]?.cells[0];
+        const count = cell?.type === 'integer' && cell.value !== null ? Number(cell.value) : null;
+        out.push({
+          name: t.name,
+          kind: t.kind === 'view' ? 'view' : 'table',
+          count,
+        });
       } catch (err) {
-        setStatsError(String(err));
-      } finally {
-        setStatsLoading(false);
+        out.push({
+          name: t.name,
+          kind: t.kind === 'view' ? 'view' : 'table',
+          count: null,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
-    },
-    [],
-  );
+    }
+    return out;
+  }, [activeTab]);
 
   const openStats = useCallback(() => {
     if (!activeTab.sessionId) return;
@@ -283,9 +525,51 @@ export function App() {
 
   const handleShowDdl = useCallback(
     async (kind: DdlSourceKind, name: string) => {
+      leaveCurrentPage();
       const tab = activeTab;
-      if (!tab.sessionId) return;
-      setDdlViewer({ kind, name, source: null, loading: true, error: null });
+      const tabId = tab.id;
+      // Surface the routine in the content pane (clearing any focused
+      // table) so the inspector replaces the bare query results without
+      // an intrusive modal overlay.
+      patchTab(tabId, {
+        focusedObjectName: null,
+        focusedRoutine: { kind, name, source: null, loading: true, error: null },
+      });
+      // Generators + domains have no `*_SOURCE` column in Firebird's
+      // metadata — synthesize a minimal `CREATE …` DDL from the
+      // already-cached schema instead of running a query.
+      if (kind === 'generator') {
+        const gen = tab.schema?.generators?.find((g) => g.name === name);
+        const source = gen
+          ? `CREATE SEQUENCE "${name}" START WITH ${gen.currentValue};`
+          : `-- Generator ${name} not found in the cached schema.`;
+        patchTab(tabId, {
+          focusedRoutine: { kind, name, source, loading: false, error: null },
+        });
+        return;
+      }
+      if (kind === 'domain') {
+        const dom = tab.schema?.domains?.find((d) => d.name === name);
+        const source = dom
+          ? `CREATE DOMAIN "${name}" AS ${dom.sqlType}${dom.nullable ? '' : ' NOT NULL'};`
+          : `-- Domain ${name} not found in the cached schema.`;
+        patchTab(tabId, {
+          focusedRoutine: { kind, name, source, loading: false, error: null },
+        });
+        return;
+      }
+      if (!tab.sessionId) {
+        patchTab(tabId, {
+          focusedRoutine: {
+            kind,
+            name,
+            source: null,
+            loading: false,
+            error: 'Connect to a database first to view DDL.',
+          },
+        });
+        return;
+      }
       try {
         const sql = sourceQuery(kind, name);
         const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
@@ -304,26 +588,59 @@ export function App() {
         }
         const cell = first.result.Rows.rows[0]?.cells[0];
         let source = '';
-        if (cell?.type === 'text') source = cell.value;
-        else if (cell?.type === 'null') source = '';
-        setDdlViewer({ kind, name, source, loading: false, error: null });
+        if (cell?.type === 'text') {
+          source = cell.value;
+        } else if (cell?.type === 'null') {
+          source = '';
+        } else if (cell?.type === 'blob') {
+          // Firebird stores routine/view bodies in `BLOB SUB_TYPE TEXT`
+          // columns. The driver inlines short text blobs as 'text' but
+          // larger ones (e.g. multi-page procedure bodies) arrive as
+          // blob refs — fetch the bytes and decode UTF-8.
+          const hex = await tauriTransport.invoke<string>('db_fetch_blob', {
+            sessionId: tab.sessionId,
+            blobId: cell.value.id,
+          });
+          source = new TextDecoder('utf-8', { fatal: false }).decode(decodeHex(hex));
+        }
+        // Some procedures / triggers / views ship with NULL source
+        // (RDB$PROCEDURE_SOURCE etc. is `null`) — the body was compiled
+        // into BLR without preserving its text. Surface that honestly
+        // and give the user something they can run instead of an empty
+        // pane. Classic offender: the Firebird `employee.fdb`
+        // `GIVE_RAISE` procedure restored from an older `.fbk`.
+        if (source.trim().length === 0) {
+          source = synthesizeMissingSourceNote(kind, name, tab.schema);
+        }
+        patchTab(tabId, {
+          focusedRoutine: { kind, name, source, loading: false, error: null },
+        });
       } catch (err) {
-        setDdlViewer({
-          kind,
-          name,
-          source: null,
-          loading: false,
-          error: err instanceof Error ? err.message : String(err),
+        patchTab(tabId, {
+          focusedRoutine: {
+            kind,
+            name,
+            source: null,
+            loading: false,
+            error: err instanceof Error ? err.message : String(err),
+          },
         });
       }
     },
-    [activeTab],
+    [activeTab, patchTab, leaveCurrentPage],
   );
 
   const openHistory = useCallback(async () => {
-    const pid = activeTab.selectedProfileId;
-    if (!pid) return;
+    // History is a destination, so it displaces the others rather than
+    // stacking on top of them.
+    leaveCurrentPage();
     setHistoryOpen(true);
+
+    // Opening always works, even with nowhere to read from. Returning
+    // early here is what made the button do nothing at all for a
+    // session connected without a saved profile: the click was
+    // swallowed and the interface said nothing about why.
+    const pid = historyKeyOf(activeTab.selectedProfileId, activeTab.form);
     setHistoryLoading(true);
     try {
       const res = await tauriTransport.invoke<HistoryEntry[]>('history_list', {
@@ -336,11 +653,10 @@ export function App() {
     } finally {
       setHistoryLoading(false);
     }
-  }, [activeTab, activeTabId, patchTab]);
+  }, [activeTab, activeTabId, patchTab, leaveCurrentPage]);
 
   const clearHistory = useCallback(async () => {
-    const pid = activeTab.selectedProfileId;
-    if (!pid) return;
+    const pid = historyKeyOf(activeTab.selectedProfileId, activeTab.form);
     try {
       await tauriTransport.invoke<number>('history_clear', { profileId: pid });
       setHistoryEntries([]);
@@ -349,35 +665,26 @@ export function App() {
     }
   }, [activeTab, activeTabId, patchTab]);
 
-  const deleteHistoryEntry = useCallback(
-    async (id: number) => {
-      await tauriTransport.invoke<boolean>('history_delete', { id });
-      setHistoryEntries((prev) => (prev ? prev.filter((e) => e.id !== id) : prev));
-    },
-    [],
-  );
+  const deleteHistoryEntry = useCallback(async (id: number) => {
+    await tauriTransport.invoke<boolean>('history_delete', { id });
+    setHistoryEntries((prev) => (prev ? prev.filter((e) => e.id !== id) : prev));
+  }, []);
 
-  const deleteHistoryEntries = useCallback(
-    async (ids: number[]) => {
-      if (ids.length === 0) return;
-      await tauriTransport.invoke<number>('history_delete_many', {
-        request: { ids },
-      });
-      const drop = new Set(ids);
-      setHistoryEntries((prev) =>
-        prev ? prev.filter((e) => !drop.has(e.id)) : prev,
-      );
-    },
-    [],
-  );
+  const deleteHistoryEntries = useCallback(async (ids: number[]) => {
+    if (ids.length === 0) return;
+    await tauriTransport.invoke<number>('history_delete_many', {
+      request: { ids },
+    });
+    const drop = new Set(ids);
+    setHistoryEntries((prev) => (prev ? prev.filter((e) => !drop.has(e.id)) : prev));
+  }, []);
 
   const setHistoryLabel = useCallback(
     async (id: number, label: string | null) => {
       await tauriTransport.invoke<boolean>('history_set_label', {
         request: { id, label },
       });
-      const normalized =
-        label && label.trim().length > 0 ? label.trim() : null;
+      const normalized = label && label.trim().length > 0 ? label.trim() : null;
       // Apply the change in-place rather than re-fetching the whole
       // list — keeps the optimistic UX snappy and avoids the modal
       // flickering when the panel is wide.
@@ -416,15 +723,20 @@ export function App() {
   const handleBrowseFbclient = useCallback(async (): Promise<string | null> => {
     const isMac = navigator.platform.toLowerCase().includes('mac');
     const isWindows = navigator.platform.toLowerCase().includes('win');
-    const extensions = isMac
-      ? ['dylib']
-      : isWindows
-      ? ['dll']
-      : ['so', 'so.*'];
+    const extensions = isMac ? ['dylib'] : isWindows ? ['dll'] : ['so', 'so.*'];
     const result = await openDialog({
       multiple: false,
       directory: false,
       filters: [{ name: 'Firebird client library', extensions }],
+    });
+    return typeof result === 'string' ? result : null;
+  }, []);
+
+  const handleBrowseDatabase = useCallback(async (): Promise<string | null> => {
+    const result = await openDialog({
+      multiple: false,
+      directory: false,
+      filters: [{ name: 'Firebird database', extensions: ['fdb', 'gdb'] }],
     });
     return typeof result === 'string' ? result : null;
   }, []);
@@ -440,20 +752,15 @@ export function App() {
     return inspection;
   }, []);
 
-  const handleDownloadFbclient = useCallback(
-    async (version?: string): Promise<string> => {
-      const res = await tauriTransport.invoke<{ path: string; version: string }>(
-        'fbclient_download',
-        version === undefined ? {} : { version },
-      );
-      return res.path;
-    },
-    [],
-  );
+  const handleDownloadFbclient = useCallback(async (version?: string): Promise<string> => {
+    const res = await tauriTransport.invoke<{ path: string; version: string }>(
+      'fbclient_download',
+      version === undefined ? {} : { version },
+    );
+    return res.path;
+  }, []);
 
-  const [fbclientReleases, setFbclientReleases] = useState<
-    { version: string }[] | null
-  >(null);
+  const [fbclientReleases, setFbclientReleases] = useState<{ version: string }[] | null>(null);
   useEffect(() => {
     void tauriTransport
       .invoke<{ version: string; major: string }[]>('fbclient_list_releases')
@@ -475,8 +782,14 @@ export function App() {
   }, [refreshProfiles]);
 
   const updateField = <K extends keyof ConnectionForm>(key: K, value: ConnectionForm[K]) => {
+    // Pull the freshest tab.form from the store rather than spreading
+    // the closure-captured `activeTab.form`. Multiple back-to-back
+    // updateField calls inside one click handler would otherwise read
+    // the SAME stale closure value and clobber each other's writes.
+    const fresh = useTabsStore.getState().tabs.find((t) => t.id === activeTabId);
+    if (!fresh) return;
     patchTab(activeTabId, {
-      form: { ...activeTab.form, [key]: value },
+      form: { ...fresh.form, [key]: value },
       testResult: null,
     });
   };
@@ -492,18 +805,7 @@ export function App() {
       selectedProfileId: id,
       profileName: profile.name,
       profileColor: profile.color ?? null,
-      form: {
-        host: profile.host,
-        port: profile.port,
-        database: profile.database,
-        user: profile.user,
-        password: '',
-        pureRust: profile.pureRust,
-        encryptionKey: '',
-        encryptionRequired: profile.encryptionRequired,
-        fbclientPath: profile.fbclientPath ?? '',
-        charset: profile.charset ?? 'UTF8',
-      },
+      form: profileToForm(profile),
     });
   };
 
@@ -512,6 +814,10 @@ export function App() {
     const tab = activeTab;
     patchTab(tabId, { error: null, busy: true });
     try {
+      // Not the library's `formToDraft`: this edition stores the
+      // password and encryption key in the OS keyring, and the web
+      // edition deliberately keeps no secrets server-side, so the two
+      // payloads are different on purpose rather than by accident.
       const draft = {
         id: tab.selectedProfileId,
         name: tab.profileName.trim(),
@@ -526,6 +832,7 @@ export function App() {
         color: tab.profileColor,
         fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
         charset: tab.form.charset === '' ? null : tab.form.charset,
+        embedded: tab.form.embedded,
       };
       const saved = await tauriTransport.invoke<Profile>('profile_save', { draft });
       await refreshProfiles();
@@ -563,278 +870,164 @@ export function App() {
   };
 
   const handleQuickConnect = async (profileId: string) => {
-    const tabId = activeTabId;
     const profile = profiles.find((p) => p.id === profileId);
     if (!profile) return;
-    patchTab(tabId, {
-      error: null,
-      busy: true,
-      cryptState: null,
-      selectedProfileId: profileId,
-      profileName: profile.name,
-      form: {
-        ...activeTab.form,
-        host: profile.host,
-        port: profile.port,
-        database: profile.database,
-        user: profile.user,
-        encryptionRequired: profile.encryptionRequired,
-        pureRust: profile.pureRust,
-      },
-    });
-    try {
-      const response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
-        request: {
-          profileId,
-          password: activeTab.form.password === '' ? null : activeTab.form.password,
-          encryptionKey: activeTab.form.encryptionKey === '' ? null : activeTab.form.encryptionKey,
-          pureRust: profile.pureRust,
-          encryptionRequired: profile.encryptionRequired,
-          fbclientPath:
-            activeTab.form.fbclientPath === '' ? null : activeTab.form.fbclientPath,
-        },
-      });
-      patchTab(tabId, {
-        sessionId: response.sessionId,
-        results: null,
-        health: 'healthy',
-        lastPingAt: Date.now(),
-        connectedAt: Date.now(),
-      });
-      renameTab(tabId, profile.name);
-      void refreshCryptState(tabId, response.sessionId);
-      void refreshSchema(tabId, response.sessionId);
-      void refreshEngineVersion(tabId, response.sessionId);
-    } catch (err) {
-      patchTab(tabId, { error: String(err) });
-    } finally {
-      patchTab(tabId, { busy: false });
-    }
+    await quickConnect(profile);
   };
 
-  const handleTestConnection = async () => {
-    const tabId = activeTabId;
-    const tab = activeTab;
-    patchTab(tabId, { testing: true, testResult: null });
-    try {
-      const res = await tauriTransport.invoke<TestConnectionResult>('db_test_connection', {
-        request: {
-          host: tab.form.host,
-          port: tab.form.port,
-          database: tab.form.database,
-          user: tab.form.user,
-          password: tab.form.password,
-          encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-          encryptionRequired: tab.form.encryptionRequired,
-          pureRust: tab.form.pureRust,
-          fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-          charset: tab.form.charset === '' ? null : tab.form.charset,
-        },
-      });
-      patchTab(tabId, { testResult: res });
-    } catch (err) {
-      patchTab(tabId, {
-        testResult: {
-          ok: false,
-          firebirdVersion: null,
-          error: String(err),
-          durationMs: 0,
-        },
-      });
-    } finally {
-      patchTab(tabId, { testing: false });
-    }
-  };
+  // Connect, reconnect, test, the health probe and auto-reconnect all
+  // live in `@plamenix/ui` now — the web shell ran a near-identical copy
+  // of every one of them, and one of the two had already drifted. What
+  // stays here is the part that is genuinely this edition's: Tauri
+  // command names, and `null` rather than `undefined` for an absent
+  // optional field.
+  const connectionAdapter = useMemo<ConnectionAdapter>(
+    () => ({
+      connect: ({ form, profileId }) =>
+        profileId !== null
+          ? tauriTransport.invoke<ConnectResponse>('profile_connect', {
+              request: {
+                profileId,
+                password: form.password === '' ? null : form.password,
+                encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+                pureRust: form.pureRust,
+                encryptionRequired: form.encryptionRequired,
+                fbclientPath: form.fbclientPath === '' ? null : form.fbclientPath,
+                charset: form.charset === '' ? null : form.charset,
+                embedded: form.embedded,
+              },
+            })
+          : tauriTransport.invoke<ConnectResponse>('db_connect', {
+              request: {
+                host: form.host,
+                port: form.port,
+                database: form.database,
+                user: form.user,
+                password: form.password,
+                encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+                encryptionRequired: form.encryptionRequired,
+                pureRust: form.pureRust,
+                fbclientPath: form.fbclientPath === '' ? null : form.fbclientPath,
+                charset: form.charset === '' ? null : form.charset,
+                embedded: form.embedded,
+              },
+            }),
+      testConnection: (form) =>
+        tauriTransport.invoke<TestConnectionResult>('db_test_connection', {
+          request: {
+            host: form.host,
+            port: form.port,
+            database: form.database,
+            user: form.user,
+            password: form.password,
+            encryptionKey: form.encryptionKey === '' ? null : form.encryptionKey,
+            encryptionRequired: form.encryptionRequired,
+            pureRust: form.pureRust,
+            fbclientPath: form.fbclientPath === '' ? null : form.fbclientPath,
+            charset: form.charset === '' ? null : form.charset,
+          },
+        }),
+      pingSession: (sessionId) => tauriTransport.invoke<string>('db_ping', { sessionId }),
+    }),
+    [],
+  );
 
-  const handleConnect = async () => {
-    const tabId = activeTabId;
-    const tab = activeTab;
-    patchTab(tabId, { error: null, busy: true, cryptState: null });
-    try {
-      let response: ConnectResponse;
-      if (tab.selectedProfileId !== null) {
-        response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
-          request: {
-            profileId: tab.selectedProfileId,
-            password: tab.form.password === '' ? null : tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            pureRust: tab.form.pureRust,
-            encryptionRequired: tab.form.encryptionRequired,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-          },
-        });
-      } else {
-        response = await tauriTransport.invoke<ConnectResponse>('db_connect', {
-          request: {
-            host: tab.form.host,
-            port: tab.form.port,
-            database: tab.form.database,
-            user: tab.form.user,
-            password: tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            encryptionRequired: tab.form.encryptionRequired,
-            pureRust: tab.form.pureRust,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-          },
-        });
-      }
-      patchTab(tabId, {
-        sessionId: response.sessionId,
-        results: null,
-        health: 'healthy',
-        lastPingAt: Date.now(),
-        connectedAt: Date.now(),
-      });
-      renameTab(tabId, tab.profileName.trim() || deriveTitle(tab.form));
-      void refreshCryptState(tabId, response.sessionId);
-      void refreshSchema(tabId, response.sessionId);
-      void refreshEngineVersion(tabId, response.sessionId);
-    } catch (err) {
-      patchTab(tabId, { error: String(err) });
-    } finally {
-      patchTab(tabId, { busy: false });
-    }
-  };
-
-  const handleReconnect = useCallback(async () => {
-    const tabId = activeTabId;
-    const tab = activeTab;
-    if (tab.health === 'reconnecting') return;
-    patchTab(tabId, { health: 'reconnecting', error: null });
-    try {
-      let response: ConnectResponse;
-      if (tab.selectedProfileId !== null) {
-        response = await tauriTransport.invoke<ConnectResponse>('profile_connect', {
-          request: {
-            profileId: tab.selectedProfileId,
-            password: tab.form.password === '' ? null : tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            pureRust: tab.form.pureRust,
-            encryptionRequired: tab.form.encryptionRequired,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-          },
-        });
-      } else {
-        response = await tauriTransport.invoke<ConnectResponse>('db_connect', {
-          request: {
-            host: tab.form.host,
-            port: tab.form.port,
-            database: tab.form.database,
-            user: tab.form.user,
-            password: tab.form.password,
-            encryptionKey: tab.form.encryptionKey === '' ? null : tab.form.encryptionKey,
-            encryptionRequired: tab.form.encryptionRequired,
-            pureRust: tab.form.pureRust,
-            fbclientPath: tab.form.fbclientPath === '' ? null : tab.form.fbclientPath,
-            charset: tab.form.charset === '' ? null : tab.form.charset,
-          },
-        });
-      }
-      patchTab(tabId, {
-        sessionId: response.sessionId,
-        health: 'healthy',
-        lastPingAt: Date.now(),
-        connectedAt: Date.now(),
-      });
-      void tauriTransport
-        .invoke<string>('db_ping', { sessionId: response.sessionId })
-        .then((version) =>
-          patchTab(tabId, {
-            engineVersion: version.trim().length > 0 ? version.trim() : null,
-          }),
-        )
-        .catch(() => patchTab(tabId, { engineVersion: null }));
-    } catch (err) {
-      patchTab(tabId, { health: 'dead', error: String(err) });
-    }
-  }, [activeTab, activeTabId, patchTab]);
-
-  useHealthProbe({
+  const autoReconnect = useConnectionPrefs((s) => s.autoReconnect);
+  const {
+    handleConnect,
+    handleReconnect,
+    handleTestConnection,
+    handleQuickConnect: quickConnect,
+  } = useConnectionActions({
+    adapter: connectionAdapter,
+    activeTab,
     tabs,
-    ping: (sessionId) => tauriTransport.invoke<string>('db_ping', { sessionId }),
-    onPatch: (tabId, patch) => patchTab(tabId, patch),
+    patchTab,
+    renameTab,
+    deriveTitle,
+    autoReconnect,
+    onConnected: (tabId, sessionId) => {
+      void refreshCryptState(tabId, sessionId);
+      void refreshSchema(tabId, sessionId);
+      void refreshEngineVersion(tabId, sessionId);
+      void refreshTxStatus(tabId, sessionId);
+    },
   });
 
-  // Auto-reconnect: when a tab's health probe trips to `dead`, fire a
-  // single reconnect attempt automatically. `lastAutoDeadRef` gates
-  // retries to one per dead transition per tab so a failing attach
-  // does not loop. Manual reconnect always clears the gate the next
-  // time the tab returns to healthy.
-  const autoReconnect = useConnectionPrefs((s) => s.autoReconnect);
-  const lastAutoDeadRef = useRef<string | null>(null);
-  useEffect(() => {
-    if (!autoReconnect) {
-      lastAutoDeadRef.current = null;
-      return;
-    }
-    if (activeTab.health !== 'dead') {
-      lastAutoDeadRef.current = null;
-      return;
-    }
-    if (activeTab.busy) return;
-    if (lastAutoDeadRef.current === activeTab.id) return;
-    lastAutoDeadRef.current = activeTab.id;
-    void handleReconnect();
-  }, [activeTab.health, activeTab.busy, activeTab.id, autoReconnect, handleReconnect]);
 
-  const refreshCryptState = async (tabId: string, sessionId: string) => {
-    try {
-      const state = await tauriTransport.invoke<CryptState>('db_crypt_state', { sessionId });
-      patchTab(tabId, { cryptState: state });
-    } catch {
-      patchTab(tabId, { cryptState: null });
-    }
-  };
+  const { refreshCryptState, refreshEngineVersion, refreshSchema, refreshTxStatus } =
+    useSessionRefreshers({
+      adapter: useMemo(
+        () => ({
+          cryptState: (sessionId) =>
+            tauriTransport.invoke<CryptState>('db_crypt_state', { sessionId }),
+          engineVersion: (sessionId) => tauriTransport.invoke<string>('db_ping', { sessionId }),
+          describeSchema: (sessionId) =>
+            tauriTransport.invoke<Schema>('db_describe_schema', { sessionId }),
+          transactionStatus: (sessionId) =>
+            tauriTransport.invoke<TxStatus>('db_transaction_status', { sessionId }),
+        }),
+        [],
+      ),
+      patchTab,
+    });
 
-  const refreshEngineVersion = async (tabId: string, sessionId: string) => {
-    try {
-      const version = await tauriTransport.invoke<string>('db_ping', { sessionId });
-      patchTab(tabId, {
-        engineVersion: version.trim().length > 0 ? version.trim() : null,
-        lastPingAt: Date.now(),
-      });
-    } catch {
-      patchTab(tabId, { engineVersion: null });
-    }
-  };
-
-  const refreshSchema = async (tabId: string, sessionId: string) => {
-    try {
-      const schema = await tauriTransport.invoke<Schema>('db_describe_schema', { sessionId });
-      patchTab(tabId, { schema });
-    } catch (err) {
-      patchTab(tabId, { error: String(err) });
-    }
-  };
 
   const handleExecute = async () => {
     const tabId = activeTabId;
     const tab = activeTab;
     if (!tab.sessionId) return;
-    const sqlAtSend = tab.sql;
+    const decision = await resolveStatement({
+      tabId,
+      sessionId: tab.sessionId,
+      sql: tab.sql,
+    });
+    if (decision.action === 'cancel') {
+      patchTab(tabId, { error: decision.reason });
+      return;
+    }
+    const sql = decision.sql;
     const key = recentKeyOf(tab.form, tab.profileName);
     const startedAt = Date.now();
+    // Remembered so the outcome can be discarded if the tab has moved
+    // to a different session by the time it settles.
+    const ranAgainst = tab.sessionId;
     patchTab(tabId, { error: null, busy: true });
     try {
       const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
         request: {
           sessionId: tab.sessionId,
-          sql: sqlAtSend,
-          profileId: tab.selectedProfileId,
+          sql,
+          profileId: historyKeyOf(tab.selectedProfileId, tab.form),
           historyLimit: currentHistoryLimit(),
         },
       });
-      patchTab(tabId, { results: res, executedSql: sqlAtSend, focusedObjectName: null });
+      patchTab(tabId, {
+        results: res,
+        executedSql: sql,
+        focusedObjectName: null,
+        focusedRoutine: null,
+      });
       notifyMutations(res);
-      recordExec(key, sqlAtSend, startedAt, res, null);
+      recordExec(key, sql, startedAt, res, null);
+      // Manual mode opens the transaction on the first statement and
+      // counts each one after that, so the indicator needs a refresh.
+      if (tab.sessionId) void refreshTxStatus(tabId, tab.sessionId);
     } catch (err) {
+      // A statement whose session the tab has since left is not a
+      // failure to report: abandoning ends the session under the
+      // in-flight execute, so this rejection is the abandon working.
+      // Writing it would stamp an error on a tab that has already
+      // reconnected and looks healthy.
+      if (isStaleSession(ranAgainst, useTabsStore.getState().tabs.find((t) => t.id === tabId)?.sessionId ?? null)) {
+        return;
+      }
       patchTab(tabId, { error: String(err) });
-      recordExec(key, sqlAtSend, startedAt, null, String(err));
+      recordExec(key, sql, startedAt, null, String(err));
     } finally {
-      patchTab(tabId, { busy: false });
+      if (!isStaleSession(ranAgainst, useTabsStore.getState().tabs.find((t) => t.id === tabId)?.sessionId ?? null)) {
+        patchTab(tabId, { busy: false });
+      }
     }
   };
 
@@ -851,20 +1044,11 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         });
-        const first = outcomes[0];
-        if (!first) {
-          throw new Error('UPDATE produced no outcome.');
-        }
-        if (first.status === 'err') {
-          throw new Error(first.error);
-        }
-        if ('Affected' in first.result && first.result.Affected.rows === 0) {
-          throw new Error('UPDATE matched zero rows.');
-        }
+        firstAffected(outcomes, 'UPDATE');
         notifyMutations(outcomes);
         recordExec(key, sql, startedAt, outcomes, null);
       } catch (err) {
@@ -894,17 +1078,14 @@ export function App() {
       const key = recentKeyOf(tab.form, tab.profileName);
       const startedAt = Date.now();
       try {
-        const outcomes = await tauriTransport.invoke<StatementOutcome[]>(
-          'db_execute',
-          {
-            request: {
-              sessionId: tab.sessionId,
-              sql,
-              profileId: tab.selectedProfileId,
-              historyLimit: currentHistoryLimit(),
-            },
+        const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+          request: {
+            sessionId: tab.sessionId,
+            sql,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
+            historyLimit: currentHistoryLimit(),
           },
-        );
+        });
         for (const outcome of outcomes) {
           if (outcome.status === 'err') throw new Error(outcome.error);
         }
@@ -919,109 +1100,99 @@ export function App() {
   );
 
   const handleStreamedExport: StreamedExportRunner = useCallback(
-    async (req: StreamedExportRequest): Promise<StreamedExportResult> => {
-      const { listen } = await import('@tauri-apps/api/event');
-      const chunks: string[] = [];
-      let resolveDone: (() => void) | null = null;
-      let rejectErr: ((err: Error) => void) | null = null;
-      const completion = new Promise<void>((resolve, reject) => {
-        resolveDone = resolve;
-        rejectErr = reject;
-      });
-      let expectedId: string | null = null;
-      const unsubs: (() => void)[] = [];
-      unsubs.push(
-        await listen<{ exportId: string; seq: number; text: string }>(
-          'export:chunk',
-          (event) => {
-            if (expectedId === null || event.payload.exportId === expectedId) {
-              chunks[event.payload.seq] = event.payload.text;
-            }
-          },
-        ),
-      );
-      unsubs.push(
-        await listen<{ exportId: string; totalBytes: number }>(
-          'export:done',
-          (event) => {
-            if (expectedId === null || event.payload.exportId === expectedId) {
-              resolveDone?.();
-            }
-          },
-        ),
-      );
-      unsubs.push(
-        await listen<{ exportId: string; error: string }>('export:err', (event) => {
-          if (expectedId === null || event.payload.exportId === expectedId) {
-            rejectErr?.(new Error(event.payload.error));
+    async (req: StreamedExportRequest): Promise<StreamedExportResult> =>
+      runGuardedExport(req, {
+        tabId: activeTab.id,
+        // This edition streams the file back over Tauri events rather
+        // than in the command's response, so the subscriptions have to
+        // be live before the command is invoked.
+        transfer: async (request) => {
+          const { listen } = await import('@tauri-apps/api/event');
+          const chunks: string[] = [];
+          let resolveDone: (() => void) | null = null;
+          let rejectErr: ((err: Error) => void) | null = null;
+          const completion = new Promise<void>((resolve, reject) => {
+            resolveDone = resolve;
+            rejectErr = reject;
+          });
+          // The backend mints its own id and returns it; chunks are
+          // filtered on that rather than on the one the events carry.
+          let expectedId: string | null = null;
+          const unsubs: (() => void)[] = [];
+          unsubs.push(
+            await listen<{ exportId: string; seq: number; text: string }>(
+              'export:chunk',
+              (event) => {
+                if (expectedId === null || event.payload.exportId === expectedId) {
+                  chunks[event.payload.seq] = event.payload.text;
+                }
+              },
+            ),
+          );
+          unsubs.push(
+            await listen<{ exportId: string; totalBytes: number }>('export:done', (event) => {
+              if (expectedId === null || event.payload.exportId === expectedId) {
+                resolveDone?.();
+              }
+            }),
+          );
+          unsubs.push(
+            await listen<{ exportId: string; error: string }>('export:err', (event) => {
+              if (expectedId === null || event.payload.exportId === expectedId) {
+                rejectErr?.(new Error(event.payload.error));
+              }
+            }),
+          );
+          try {
+            expectedId = await tauriTransport.invoke<string>('db_export', {
+              request: {
+                sessionId: request.sessionId,
+                format: request.format,
+                csvDelimiter: request.csvDelimiter,
+                scope: request.scope,
+                includeDdl: request.includeDdl ?? true,
+              },
+            });
+            await completion;
+            const mime: Record<string, string> = {
+              csv: 'text/csv',
+              json: 'application/json',
+              sql: 'application/sql',
+              xml: 'application/xml',
+            };
+            const blob = new Blob([chunks.join('')], {
+              type: `${mime[request.format] ?? 'application/octet-stream'};charset=utf-8`,
+            });
+            const stamp = new Date().toISOString().replace(/[-:T]/g, '').slice(0, 15);
+            return { blob, suggestedFilename: `plamenix-export-${stamp}.${request.format}` };
+          } finally {
+            for (const u of unsubs) u();
           }
-        }),
-      );
-      try {
-        const csvDelimiter = req.csvDelimiter;
-        expectedId = await tauriTransport.invoke<string>('db_export', {
-          request: {
-            sessionId: req.sessionId,
-            format: req.format,
-            csvDelimiter,
-            scope: req.scope,
-            includeDdl: req.includeDdl ?? true,
-          },
-        });
-        await completion;
-        const body = chunks.join('');
-        const mime: Record<string, string> = {
-          csv: 'text/csv',
-          json: 'application/json',
-          sql: 'application/sql',
-          xml: 'application/xml',
-        };
-        const blob = new Blob([body], {
-          type: `${mime[req.format] ?? 'application/octet-stream'};charset=utf-8`,
-        });
-        const stamp = new Date()
-          .toISOString()
-          .replace(/[-:T]/g, '')
-          .slice(0, 15);
-        return {
-          blob,
-          suggestedFilename: `plamenix-export-${stamp}.${req.format}`,
-        };
-      } finally {
-        for (const u of unsubs) u();
-      }
-    },
-    [],
+        },
+      }),
+    [activeTab.id],
   );
 
   const handleFetchTableExport = useCallback(
     async (table: TableInfo): Promise<TableExportPart> => {
       const tab = activeTab;
       if (!tab.sessionId) throw new Error('No active session.');
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table.name)
-        ? table.name
-        : `"${table.name.replace(/"/g, '""')}"`;
-      const outcomes = await tauriTransport.invoke<StatementOutcome[]>(
-        'db_execute',
-        {
-          request: {
-            sessionId: tab.sessionId,
-            sql: `SELECT * FROM ${quoted}`,
-            profileId: tab.selectedProfileId,
-            historyLimit: currentHistoryLimit(),
-          },
+      const quoted = quoteIdentifier(table.name);
+      const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+        request: {
+          sessionId: tab.sessionId,
+          sql: `SELECT * FROM ${quoted}`,
+          // No `profileId`: this is the export dialog's own fetch, not
+          // something the user typed. Recording it would push their
+          // real statements out of a capped history, and the row it
+          // leaves behind is a `SELECT *` they never ran.
         },
-      );
-      const first = outcomes[0];
-      if (!first) throw new Error(`No outcome for ${table.name}.`);
-      if (first.status === 'err') throw new Error(`${table.name}: ${first.error}`);
-      if (!('Rows' in first.result)) {
-        throw new Error(`${table.name}: SELECT did not return rows.`);
-      }
+      });
+      const { columns, rows } = firstRows(outcomes, table.name);
       return {
         table,
-        columns: first.result.Rows.columns,
-        rows: first.result.Rows.rows,
+        columns,
+        rows,
       };
     },
     [activeTab],
@@ -1031,36 +1202,20 @@ export function App() {
     async ({ table, predicate }: { table: string; predicate: string | null }) => {
       const tab = activeTab;
       if (!tab.sessionId) throw new Error('No active session.');
-      // `quoteIdentBare` keeps existing all-upper identifiers bare (the
-      // Firebird-friendly form) and quotes lowercase/mixed names.
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table)
-        ? table
-        : `"${table.replace(/"/g, '""')}"`;
+      const quoted = quoteIdentifier(table);
       const sql = predicate
         ? `SELECT COUNT(*) FROM ${quoted} WHERE ${predicate}`
         : `SELECT COUNT(*) FROM ${quoted}`;
-      const outcomes = await tauriTransport.invoke<StatementOutcome[]>(
-        'db_execute',
-        {
-          request: {
-            sessionId: tab.sessionId,
-            sql,
-            profileId: tab.selectedProfileId,
-            historyLimit: currentHistoryLimit(),
-          },
+      const outcomes = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+        request: {
+          sessionId: tab.sessionId,
+          sql,
+          // No `profileId`: a COUNT(*) helper is the UI answering its
+          // own question, not a statement the user issued.
         },
-      );
-      const first = outcomes[0];
-      if (!first || first.status !== 'ok' || !('Rows' in first.result)) {
-        throw new Error('COUNT(*) did not return a row.');
-      }
-      const cell = first.result.Rows.rows[0]?.cells[0];
-      if (!cell) throw new Error('COUNT(*) returned an empty row.');
-      if (cell.type === 'integer') return cell.value;
-      if (cell.type === 'float' && typeof cell.value === 'number') {
-        return cell.value;
-      }
-      throw new Error(`COUNT(*) returned an unexpected cell type: ${cell.type}.`);
+      });
+      const { rows } = firstRows(outcomes, 'COUNT(*)');
+      return countFromCell(rows[0]?.cells[0]);
     },
     [activeTab],
   );
@@ -1069,9 +1224,7 @@ export function App() {
     async ({ table, predicate }: { table: string; predicate: string | null }) => {
       const tab = activeTab;
       if (!tab.sessionId) throw new Error('No active session.');
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(table)
-        ? table
-        : `"${table.replace(/"/g, '""')}"`;
+      const quoted = quoteIdentifier(table);
       const sql = predicate
         ? `SELECT * FROM ${quoted} WHERE ${predicate}`
         : `SELECT * FROM ${quoted}`;
@@ -1082,25 +1235,18 @@ export function App() {
           profileId: null,
         },
       });
-      const first = outcomes[0];
-      if (!first) throw new Error('Scoped fetch produced no outcome.');
-      if (first.status === 'err') throw new Error(first.error);
-      if (!('Rows' in first.result)) {
-        throw new Error('Scoped fetch did not return rows.');
-      }
-      return first.result.Rows.rows;
+      return firstRows(outcomes, 'Scoped fetch').rows;
     },
     [activeTab],
   );
 
   const handleBrowseTable = useCallback(
     async (name: string) => {
+      leaveCurrentPage();
       const tabId = activeTabId;
       const tab = activeTab;
       if (!tab.sessionId) return;
-      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(name)
-        ? name
-        : `"${name.replace(/"/g, '""')}"`;
+      const quoted = /^[A-Z_][A-Z0-9_]*$/.test(name) ? name : `"${name.replace(/"/g, '""')}"`;
       const sql = `SELECT * FROM ${quoted}`;
       const key = recentKeyOf(tab.form, tab.profileName);
       const startedAt = Date.now();
@@ -1110,15 +1256,16 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         });
-        // Show the data in the result panel without touching the editor
-        // buffer so any user-in-progress SQL stays intact. Also flag
-        // the tab as table-focused so the content pane swaps to the
-        // tabbed `TableObjectView` (Data / Schema / DDL).
-        patchTab(tabId, { results: res, executedSql: sql, focusedObjectName: name });
+        // Sync the editor buffer to the executed query so the SQL
+        // editor always reflects what produced the result pane —
+        // browsing a table, applying a filter, etc. The previous
+        // behaviour preserved user-in-progress SQL; users found it
+        // confusing because the editor and results pane drifted apart.
+        patchTab(tabId, { results: res, sql, executedSql: sql, focusedObjectName: name });
         recordExec(key, sql, startedAt, res, null);
       } catch (err) {
         patchTab(tabId, { error: String(err) });
@@ -1127,11 +1274,11 @@ export function App() {
         patchTab(tabId, { busy: false });
       }
     },
-    [activeTab, activeTabId, patchTab],
+    [activeTab, activeTabId, patchTab, leaveCurrentPage],
   );
 
   const handleApplyFilter = useCallback(
-    async (sql: string) => {
+    async (sql: string, options?: { recordHistory?: boolean }) => {
       const tabId = activeTabId;
       const tab = activeTab;
       if (!tab.sessionId) return;
@@ -1143,11 +1290,17 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            // Omitted for the automatic re-read after a write: history
+            // is what the user ran, and the host skips recording
+            // entirely when there is no key.
+            profileId:
+              options?.recordHistory === false
+                ? undefined
+                : historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         });
-        patchTab(tabId, { results: res, executedSql: sql });
+        patchTab(tabId, { results: res, sql, executedSql: sql });
         recordExec(key, sql, startedAt, res, null);
       } catch (err) {
         patchTab(tabId, { error: String(err) });
@@ -1159,69 +1312,123 @@ export function App() {
     [activeTab, activeTabId, patchTab],
   );
 
-  const handleSchemaAction = async (action: SchemaAction) => {
+  /** I5.5 — dispatch a fully-resolved `SchemaDdl` through the same
+   *  autoExecute / insert-into-editor / confirm-then-run pipeline the
+   *  built-in `SchemaAction` handler uses. Plugin schema_actions go
+   *  through this directly; built-in actions go through
+   *  `handleSchemaAction` → `schemaDdl(action)` → here. */
+  const dispatchDdl = async (ddl: SchemaDdl): Promise<boolean> => {
     const tabId = activeTabId;
     const tab = activeTab;
-    const ddl = schemaDdl(action);
-    if (ddl.autoExecute) {
-      if (!tab.sessionId) return;
-      const key = recentKeyOf(tab.form, tab.profileName);
-      const startedAt = Date.now();
-      patchTab(tabId, { error: null, busy: true });
-      try {
-        const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
+    const key = recentKeyOf(tab.form, tab.profileName);
+    return dispatchSchemaDdl(ddl, {
+      sessionId: tab.sessionId,
+      execute: (sql) =>
+        tauriTransport.invoke<StatementOutcome[]>('db_execute', {
           request: {
             sessionId: tab.sessionId,
-            sql: ddl.sql,
-            profileId: tab.selectedProfileId,
+            sql,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
-        });
-        notifyMutations(res);
-        recordExec(key, ddl.sql, startedAt, res, null);
-        void refreshSchema(tabId, tab.sessionId);
-      } catch (err) {
-        patchTab(tabId, { error: String(err) });
-        recordExec(key, ddl.sql, startedAt, null, String(err));
-      } finally {
-        patchTab(tabId, { busy: false });
-      }
-      return;
-    }
-    if (!ddl.destructive) {
-      patchTab(tabId, { sql: ddl.sql });
-      return;
-    }
-    if (!window.confirm(ddl.confirmPrompt ?? 'Run destructive statement?')) return;
+        }),
+      patch: (patch) => patchTab(tabId, patch),
+      record: (sql, startedAt, outcomes, error) =>
+        recordExec(key, sql, startedAt, outcomes, error),
+      refreshSchema: () => {
+        if (tab.sessionId) void refreshSchema(tabId, tab.sessionId);
+      },
+      confirm: (prompt) => window.confirm(prompt),
+    });
+  };
+
+  const handleSchemaAction = async (action: SchemaAction) => {
+    leaveCurrentPage();
+    await applySchemaAction(action, {
+      tabId: activeTabId,
+      sessionId: activeTab.sessionId,
+      dispatch: dispatchDdl,
+      patch: (patch) => patchTab(activeTabId, patch),
+    });
+  };
+
+  const handleSetTxMode = async (mode: TxMode, config: TxConfig) => {
+    const tabId = activeTabId;
+    const tab = activeTab;
     if (!tab.sessionId) return;
-    const key = recentKeyOf(tab.form, tab.profileName);
-    const startedAt = Date.now();
-    patchTab(tabId, { error: null, busy: true, sql: ddl.sql });
+    patchTab(tabId, { busy: true });
     try {
-      const res = await tauriTransport.invoke<StatementOutcome[]>('db_execute', {
-        request: {
-          sessionId: tab.sessionId,
-          sql: ddl.sql,
-          profileId: tab.selectedProfileId,
-          historyLimit: currentHistoryLimit(),
-        },
+      const status = await tauriTransport.invoke<TxStatus>('db_set_transaction_mode', {
+        sessionId: tab.sessionId,
+        mode,
+        config,
       });
-      patchTab(tabId, { results: res });
-      notifyMutations(res);
-      recordExec(key, ddl.sql, startedAt, res, null);
-      void refreshSchema(tabId, tab.sessionId);
+      patchTab(tabId, { txStatus: status, error: null });
     } catch (err) {
       patchTab(tabId, { error: String(err) });
-      recordExec(key, ddl.sql, startedAt, null, String(err));
     } finally {
       patchTab(tabId, { busy: false });
     }
+  };
+
+  const finishTx = async (command: 'db_commit' | 'db_rollback') => {
+    const tabId = activeTabId;
+    const tab = activeTab;
+    if (!tab.sessionId) return;
+    patchTab(tabId, { busy: true });
+    try {
+      const status = await tauriTransport.invoke<TxStatus>(command, {
+        sessionId: tab.sessionId,
+      });
+      patchTab(tabId, { txStatus: status, error: null });
+      // Committed or discarded work changes what the schema looks like,
+      // since Firebird makes DDL transactional too.
+      void refreshSchema(tabId, tab.sessionId);
+    } catch (err) {
+      patchTab(tabId, { error: String(err) });
+    } finally {
+      patchTab(tabId, { busy: false });
+    }
+  };
+
+  /// Asks before throwing away uncommitted work.
+  ///
+  /// Returns false when the user backs out. An open transaction with
+  /// nothing in it is not worth interrupting anyone over, which is what
+  /// `hasUncommittedWork` encodes.
+  const confirmDiscardTx = (tab: TabState, what: string): boolean => {
+    if (!hasUncommittedWork(tab.txStatus)) return true;
+    const count = tab.txStatus?.pendingStatements ?? 0;
+    const statements = count === 1 ? '1 statement' : `${count} statements`;
+    return window.confirm(
+      `${what} will roll back ${statements} that have not been committed. Continue?`,
+    );
+  };
+
+  // Firebird offers no way to stop a running statement through either
+  // backend Plamenix ships, so the only honest lever is the attachment
+  // itself: detaching rolls back the transaction and the server stops
+  // the work with it. The user is told that cost before it happens.
+  const handleAbandon = async () => {
+    const tabId = activeTabId;
+    const tab = activeTab;
+    if (!tab.sessionId) return;
+    if (abandonNeedsConfirmation(tab.txStatus) && !window.confirm(describeAbandonCost(tab.txStatus))) {
+      return;
+    }
+    await abandonStatement({
+      sessionId: tab.sessionId,
+      close: (sessionId) => tauriTransport.invoke<null>('db_close', { sessionId }).then(() => undefined),
+      reconnect: handleReconnect,
+      onError: (message) => patchTab(tabId, { error: message }),
+    });
   };
 
   const handleDisconnect = async () => {
     const tabId = activeTabId;
     const tab = activeTab;
     if (!tab.sessionId) return;
+    if (!confirmDiscardTx(tab, 'Disconnecting')) return;
     patchTab(tabId, { error: null, busy: true });
     try {
       await tauriTransport.invoke<null>('db_close', { sessionId: tab.sessionId });
@@ -1240,6 +1447,7 @@ export function App() {
         lastPingAt: null,
         connectedAt: null,
         engineVersion: null,
+        txStatus: null,
       });
     } catch (err) {
       patchTab(tabId, { error: String(err) });
@@ -1250,10 +1458,9 @@ export function App() {
 
   const handleTabClose = (id: string) => {
     const tab = tabs.find((t) => t.id === id);
+    if (tab && !confirmDiscardTx(tab, 'Closing this tab')) return;
     if (tab?.sessionId) {
-      void tauriTransport
-        .invoke<null>('db_close', { sessionId: tab.sessionId })
-        .catch(() => {});
+      void tauriTransport.invoke<null>('db_close', { sessionId: tab.sessionId }).catch(() => {});
     }
     closeTab(id);
   };
@@ -1265,85 +1472,143 @@ export function App() {
   const toggleSidebar = useThemeStore((s) => s.toggleSidebar);
   const themeMode = useResolvedThemeMode();
 
-  const handlersRef = useRef({
-    newTab,
-    handleTabClose,
-    handleSaveProfile,
-    handleConnect,
-    handleExecute,
-    handleDisconnect,
-    refreshSchema,
-    toggleMode,
-    toggleSidebar,
-    setPaletteOpen,
-    setSearchOpen,
-    setShortcutsOpen,
-    activeTab,
-    activeTabId,
+  // The dispatcher and the six shell defaults live in `@plamenix/ui`.
+  // Handlers are passed directly: the hook owns the ref that keeps the
+  // once-registered bindings pointed at the current ones.
+  useDefaultKeybindings({
+    openCheatSheet: () => setShortcutsOpen(true),
+    openSearchPalette: () => setSearchOpen(true),
+    openCommandPalette: () => setPaletteOpen(true),
+    newTab: () => newTab(),
+    closeActiveTab: () => handleTabClose(activeTabId),
+    canSaveProfile: () =>
+      activeTab.sessionId === null && activeTab.profileName.trim() !== '' && !activeTab.busy,
+    saveActiveProfile: () => void handleSaveProfile(),
   });
-  handlersRef.current = {
-    newTab,
-    handleTabClose,
-    handleSaveProfile,
-    handleConnect,
-    handleExecute,
-    handleDisconnect,
-    refreshSchema,
-    toggleMode,
-    toggleSidebar,
-    setPaletteOpen,
-    setSearchOpen,
-    setShortcutsOpen,
-    activeTab,
-    activeTabId,
-  };
+  // Per-plugin settings — 6 built-ins ship a runtime-configurable
+  // panel that PluginsPage renders inline in the matching card.
+  useEffect(() => registerBuiltinPluginSettings(), []);
+  // Every shipped built-in contribution, for the life of the shell.
+  // They used to register from inside the components that consumed
+  // them, which made a feature's availability depend on an unrelated
+  // component being mounted — the Format button was the visible case.
+  useBuiltinContributions();
 
+  // Shell events reach WASM plugins from here. The host is asked which
+  // patterns anything subscribed to, so a topic nobody wants costs
+  // nothing — `editor/changed` fires as the user types.
+  const [pluginEventPatterns, setPluginEventPatterns] = useState<string[]>([]);
+  const refreshPluginEventPatterns = useCallback(() => {
+    void tauriTransport
+      .invoke<string[]>('plugin_event_patterns')
+      .then(setPluginEventPatterns)
+      .catch(() => setPluginEventPatterns([]));
+  }, []);
+  useEffect(refreshPluginEventPatterns, [refreshPluginEventPatterns]);
+  usePluginEventForwarding({
+    subscribedPatterns: pluginEventPatterns,
+    forward: (topic, payload, sessionId) => {
+      // The desktop backend also sets the slot on the execute path;
+      // passing it here covers the events that do not come from one.
+      void tauriTransport.invoke('plugin_emit_event', { topic, payload, sessionId }).catch(() => {
+        // A plugin trapping on an event must not disturb the
+        // interaction that produced it; the supervisor records it.
+      });
+    },
+  });
+
+  // After a webview reload (context-menu Reload, devtools refresh)
+  // React state is wiped but the Rust-side wasmtime session may still
+  // be alive. We persist sessionIds to **sessionStorage** (not
+  // localStorage) so reload restores them but a full app restart —
+  // which destroys the WebView + the Rust process together — wipes
+  // them. This effect pings each restored sessionId: alive ones get
+  // re-attached + their schema refetched; dead ones get cleared so
+  // the user lands on ConnectView instead of a phantom-connected tab.
   useEffect(() => {
-    const onKey = (e: KeyboardEvent) => {
-      const h = handlersRef.current;
-      // `?` opens the cheat sheet only when the user isn't typing —
-      // questions marks inside SQL or text inputs must reach the
-      // editor / form, not the modal.
-      if (e.key === '?' && !e.metaKey && !e.ctrlKey && !e.altKey) {
-        if (isTypingTarget(e.target)) return;
-        e.preventDefault();
-        h.setShortcutsOpen(true);
-        return;
-      }
-      if (!(e.metaKey || e.ctrlKey)) return;
-      const key = e.key.toLowerCase();
-      if (e.shiftKey && key === 'f') {
-        e.preventDefault();
-        h.setSearchOpen(true);
-        return;
-      }
-      switch (key) {
-        case 'k':
-          e.preventDefault();
-          h.setPaletteOpen(true);
-          break;
-        case 't':
-          e.preventDefault();
-          h.newTab();
-          break;
-        case 'w':
-          e.preventDefault();
-          h.handleTabClose(h.activeTabId);
-          break;
-        case 's':
-          if (
-            h.activeTab.sessionId === null &&
-            h.activeTab.profileName.trim() !== '' &&
-            !h.activeTab.busy
-          ) {
-            e.preventDefault();
-            void h.handleSaveProfile();
-          }
-          break;
+    const verify = async () => {
+      for (const tab of useTabsStore.getState().tabs) {
+        const stashed = readStashedSession(tab.id);
+        if (!stashed) continue;
+        try {
+          const version = await tauriTransport.invoke<string>('db_ping', {
+            sessionId: stashed,
+          });
+          patchTab(tab.id, {
+            sessionId: stashed,
+            engineVersion: version,
+            health: 'healthy',
+            lastPingAt: Date.now(),
+          });
+          void refreshSchema(tab.id, stashed);
+        } catch {
+          clearStashedSession(tab.id);
+          patchTab(tab.id, {
+            sessionId: null,
+            health: 'dead',
+            executedSql: null,
+            results: null,
+            schema: null,
+            cryptState: null,
+          });
+        }
       }
     };
-    document.addEventListener('keydown', onKey);
-    return () => document.removeEventListener('keydown', onKey);
+    void verify();
+  }, []);
+  // Mirror every live tab.sessionId into sessionStorage so the verify
+  // effect above has something to find on reload.
+  useEffect(() => {
+    for (const tab of tabs) {
+      if (tab.sessionId) writeStashedSession(tab.id, tab.sessionId);
+      else clearStashedSession(tab.id);
+    }
+  }, [tabs]);
+  // Any session-navigation (browse a table, run a query, surface DDL,
+  // etc.) makes the Plugins / Settings / About overlays stale — auto-
+  // close them so the user lands on the new content directly without
+  // an extra "Back to session" click.
+  useEffect(() => {
+    if (
+      activeTab.focusedObjectName !== null ||
+      activeTab.focusedRoutine !== null ||
+      activeTab.results !== null
+    ) {
+      setShowPlugins(false);
+      setShowSettings(false);
+      setShowAbout(false);
+    }
+  }, [activeTab.focusedObjectName, activeTab.focusedRoutine, activeTab.results]);
+
+  // Surfacing a focused table / routine should also collapse the
+  // full-screen SQL Editor page so the user lands on the new content,
+  // but a bare result-set change must NOT (running a query from inside
+  // the editor page is the whole point — results render below in-page).
+  useEffect(() => {
+    if (activeTab.focusedObjectName !== null || activeTab.focusedRoutine !== null) {
+      setShowSqlEditor(false);
+    }
+  }, [activeTab.focusedObjectName, activeTab.focusedRoutine]);
+  // Tauri's WKWebView blocks external navigation by default. Route every
+  // anchor click whose href looks external through the opener plugin so
+  // it lands in the user's system default browser. Capture phase so the
+  // listener runs before React's bubble-phase handlers and before any
+  // ancestor's `onClick` can preventDefault.
+  useEffect(() => {
+    const onClick = (e: MouseEvent) => {
+      const target = (e.target as HTMLElement | null)?.closest('a');
+      if (!target) return;
+      const href = target.getAttribute('href') ?? '';
+      if (!/^https?:\/\//i.test(href) && !/^mailto:/i.test(href)) return;
+      e.preventDefault();
+      e.stopPropagation();
+      openUrl(href).catch((err) => {
+        // eslint-disable-next-line no-console
+        console.error('openUrl failed', err);
+      });
+    };
+    document.addEventListener('click', onClick, true);
+    return () => document.removeEventListener('click', onClick, true);
   }, []);
 
   const mod = getModKeyLabel();
@@ -1358,133 +1623,25 @@ export function App() {
     return map;
   }, [tabs, themeMode]);
 
-  const commands = useMemo<Command[]>(() => {
-    const list: Command[] = [
-      {
-        id: 'new-tab',
-        label: 'New tab',
-        description: 'Open a fresh disconnected session',
-        icon: Plus,
-        shortcut: `${mod}T`,
-        group: 'Tabs',
-        run: () => newTab(),
-      },
-      {
-        id: 'close-tab',
-        label: 'Close tab',
-        description: 'Close the active session and tab',
-        icon: X,
-        shortcut: `${mod}W`,
-        group: 'Tabs',
-        run: () => handleTabClose(activeTabId),
-      },
-      {
-        id: 'toggle-theme',
-        label: `Switch to ${themeMode === 'dark' ? 'light' : 'dark'} theme`,
-        description: 'Flip the Plamenix theme',
-        icon: themeMode === 'dark' ? Sun : Moon,
-        group: 'Appearance',
-        run: () => toggleMode(),
-      },
-      {
-        id: 'toggle-sidebar',
-        label: 'Toggle schema sidebar',
-        description: 'Collapse or expand the schema browser',
-        icon: PanelLeftClose,
-        group: 'Appearance',
-        run: () => toggleSidebar(),
-      },
-      {
-        id: 'show-shortcuts',
-        label: 'Show keyboard shortcuts',
-        description: 'Cheat sheet of every shortcut Plamenix exposes',
-        icon: Keyboard,
-        shortcut: '?',
-        group: 'Help',
-        run: () => setShortcutsOpen(true),
-      },
-    ];
-
-    if (activeTab.sessionId === null) {
-      list.push(
-        {
-          id: 'save-profile',
-          label: 'Save connection profile',
-          description: 'Persist the current form values',
-          icon: Save,
-          shortcut: `${mod}S`,
-          group: 'Connection',
-          run: () => void handleSaveProfile(),
-        },
-        {
-          id: 'connect',
-          label: 'Connect',
-          description: 'Open a session against the current form',
-          icon: Plug,
-          shortcut: `${mod}↵`,
-          group: 'Connection',
-          run: () => void handleConnect(),
-        },
-      );
-    } else {
-      list.push(
-        {
-          id: 'execute',
-          label: 'Execute SQL',
-          description: 'Run the current editor buffer',
-          icon: Play,
-          shortcut: `${mod}↵`,
-          group: 'Session',
-          run: () => void handleExecute(),
-        },
-        {
-          id: 'refresh-schema',
-          label: 'Refresh schema',
-          description: 'Reload the table / view list',
-          icon: RefreshCw,
-          group: 'Session',
-          run: () => {
-            if (activeTab.sessionId) {
-              void refreshSchema(activeTabId, activeTab.sessionId);
-            }
-          },
-        },
-        {
-          id: 'disconnect',
-          label: 'Disconnect',
-          description: 'Close the active session',
-          icon: LogOut,
-          group: 'Session',
-          run: () => void handleDisconnect(),
-        },
-      );
-      if (activeTab.selectedProfileId !== null) {
-        list.push({
-          id: 'history',
-          label: 'Show query history',
-          description: 'Browse and replay statements run under this profile',
-          icon: History,
-          group: 'Session',
-          run: () => void openHistory(),
-        });
-      }
-    }
-    return list;
-  }, [
-    activeTab,
-    activeTabId,
-    handleConnect,
-    handleDisconnect,
-    handleExecute,
-    handleSaveProfile,
-    handleTabClose,
+  const commands = useShellCommands({
     mod,
-    newTab,
-    openHistory,
     themeMode,
-    toggleMode,
+    hasSession: activeTab.sessionId !== null,
+    hasProfile: activeTab.selectedProfileId !== null,
+    newTab: () => newTab(),
+    closeTab: () => handleTabClose(activeTabId),
+    toggleTheme: toggleMode,
     toggleSidebar,
-  ]);
+    showShortcuts: () => setShortcutsOpen(true),
+    saveProfile: () => void handleSaveProfile(),
+    connect: () => void handleConnect(),
+    execute: () => void handleExecute(),
+    refreshSchema: () => {
+      if (activeTab.sessionId) void refreshSchema(activeTabId, activeTab.sessionId);
+    },
+    disconnect: () => void handleDisconnect(),
+    openHistory: () => void openHistory(),
+  });
 
   return (
     <div className="flex h-full flex-col">
@@ -1500,15 +1657,107 @@ export function App() {
             accentByTabId={accentByTabId}
           />
         </div>
-        <div className="flex shrink-0 items-stretch border-b border-edge">
-          <SettingsButton onOpenDetailed={() => setShowSettings(true)} />
+        <div className="flex shrink-0 items-stretch">
+          {activeTab.sessionId !== null && (
+            <HomeButton
+              active={
+                !showSettings &&
+                !showAbout &&
+                !showPlugins &&
+                !showSqlEditor &&
+                !historyOpen &&
+                activeTab.focusedObjectName === null &&
+                activeTab.focusedRoutine === null &&
+                activeTab.results === null
+              }
+              onClick={() => {
+                leaveCurrentPage();
+                patchTab(activeTabId, {
+                  focusedObjectName: null,
+                  focusedRoutine: null,
+                  results: null,
+                  executedSql: null,
+                });
+              }}
+            />
+          )}
+          {activeTab.sessionId !== null && (
+            <HistoryButton active={historyOpen} onClick={() => void openHistory()} />
+          )}
+          <AppMenu
+            items={[
+              {
+                id: 'plugins',
+                icon: PluginsIcon,
+                label: 'Plugins',
+                badge: String(plugins.length),
+                onClick: () => {
+                  leaveCurrentPage();
+                  setShowPlugins(true);
+                },
+              },
+              {
+                id: 'settings',
+                icon: SettingsIcon,
+                label: 'Settings',
+                onClick: () => {
+                  leaveCurrentPage();
+                  setShowSettings(true);
+                },
+              },
+              {
+                id: 'about',
+                icon: InfoIcon,
+                label: 'About',
+                onClick: () => {
+                  leaveCurrentPage();
+                  setShowAbout(true);
+                },
+              },
+              ...(activeTab.sessionId !== null
+                ? [
+                    {
+                      id: 'stats',
+                      icon: ChartLineIcon,
+                      label: 'Statistics',
+                      dividerAbove: true,
+                      onClick: () => {
+                        setShowPlugins(false);
+                        setShowSettings(false);
+                        setShowAbout(false);
+                        openStats();
+                      },
+                    },
+                    {
+                      id: 'disconnect',
+                      icon: LogOutIcon,
+                      label: 'Disconnect',
+                      danger: true,
+                      dividerAbove: true,
+                      onClick: () => {
+                        void handleDisconnect();
+                      },
+                    },
+                  ]
+                : []),
+            ]}
+          />
         </div>
       </div>
-      {showSettings && activeTab.sessionId === null ? (
-        <SettingsPage
-          onClose={() => setShowSettings(false)}
+      {showAbout && activeTab.sessionId === null ? (
+        <AboutPage
+          version={APP_VERSION}
+          onClose={() => setShowAbout(false)}
           backLabel="Back to connections"
         />
+      ) : showPlugins && activeTab.sessionId === null ? (
+        <PluginsPage
+          plugins={plugins}
+          onClose={() => setShowPlugins(false)}
+          backLabel="Back to connections"
+        />
+      ) : showSettings && activeTab.sessionId === null ? (
+        <SettingsPage onClose={() => setShowSettings(false)} backLabel="Back to connections" />
       ) : activeTab.sessionId === null ? (
         <ConnectView
           tab={activeTab}
@@ -1526,6 +1775,7 @@ export function App() {
           aliasesLoading={aliasesLoading}
           onListAliases={handleListAliases}
           onBrowseFbclient={handleBrowseFbclient}
+          onBrowseDatabase={handleBrowseDatabase}
           onBrowseFbclientDir={handleBrowseFbclientDir}
           onDownloadFbclient={handleDownloadFbclient}
           fbclientReleases={fbclientReleases}
@@ -1535,13 +1785,62 @@ export function App() {
           tab={activeTab}
           showSettings={showSettings}
           onCloseSettings={() => setShowSettings(false)}
+          showPlugins={showPlugins}
+          onClosePlugins={() => setShowPlugins(false)}
+          showAbout={showAbout}
+          onCloseAbout={() => setShowAbout(false)}
+          onLeavePage={leaveCurrentPage}
+          historyPage={
+            historyOpen ? (
+              <HistoryPanel
+                open
+                variant="page"
+                profileLabel={
+                  (activeTab.selectedProfileId
+                    ? profiles.find((p) => p.id === activeTab.selectedProfileId)?.name
+                    : null) ??
+                  activeTab.profileName ??
+                  'No profile'
+                }
+                entries={historyEntries}
+                loading={historyLoading}
+                onClose={() => setHistoryOpen(false)}
+                onPick={(sql) => {
+                  patchTab(activeTabId, { sql });
+                  setHistoryOpen(false);
+                }}
+                onClear={clearHistory}
+                onSetLabel={setHistoryLabel}
+                onDeleteEntry={deleteHistoryEntry}
+                onDeleteEntries={deleteHistoryEntries}
+              />
+            ) : null
+          }
+          showSqlEditor={showSqlEditor}
+          onOpenSqlEditor={() => {
+            patchTab(activeTabId, {
+              focusedObjectName: null,
+              focusedRoutine: null,
+            });
+            setShowSqlEditor(true);
+          }}
+          onCloseSqlEditor={() => setShowSqlEditor(false)}
+          appVersion={APP_VERSION}
           onCloseFocusedObject={() => patchTab(activeTabId, { focusedObjectName: null })}
+          onCloseFocusedRoutine={() => patchTab(activeTabId, { focusedRoutine: null })}
           onOpenDeepSearch={() => setSearchOpen(true)}
           onSqlChange={(v) => patchTab(activeTabId, { sql: v })}
           onBookmarksChange={(next) => patchTab(activeTabId, { bookmarks: next })}
           onExecute={handleExecute}
+          onAbandon={() => void handleAbandon()}
           onDisconnect={handleDisconnect}
+          onSetTxMode={(mode, config) => void handleSetTxMode(mode, config)}
+          onCommitTx={() => void finishTx('db_commit')}
+          onRollbackTx={() => void finishTx('db_rollback')}
           onOpenStats={openStats}
+          stats={stats}
+          onRefreshStats={() => void refreshStats(activeTab.sessionId ?? '')}
+          onComputeRowCounts={computeRowCounts}
           onCommitCellEdit={handleCommitCellEdit}
           onCommitDdl={handleExecuteDdl}
           onFetchTableExport={handleFetchTableExport}
@@ -1558,74 +1857,34 @@ export function App() {
             }
           }}
           onSchemaAction={handleSchemaAction}
+          onPluginDdl={dispatchDdl}
           onClearError={() => patchTab(activeTabId, { error: null })}
           plugins={plugins}
-          onPickPluginPanel={(plugin, panel) => setOpenPluginPanel({ plugin, panel })}
           onShowDdl={handleShowDdl}
           onBrowseTable={handleBrowseTable}
         />
       )}
-      <DdlViewerModal
-        kind={ddlViewer?.kind ?? null}
-        name={ddlViewer?.name ?? null}
-        source={ddlViewer?.source ?? null}
-        loading={ddlViewer?.loading ?? false}
-        error={ddlViewer?.error ?? null}
-        onClose={() => setDdlViewer(null)}
-        onOpenInEditor={(sql) => {
-          const id = newTab();
-          patchTab(id, { sql });
-          setActive(id);
+      <ShellOverlays
+        tab={{
+          sessionId: activeTab.sessionId,
+          health: activeTab.health,
+          user: activeTab.form.user,
+          host: activeTab.form.host,
+          port: activeTab.form.port,
+          database: activeTab.form.database,
+          executedSql: activeTab.executedSql,
+          results: activeTab.results,
+          schema: activeTab.schema,
         }}
-      />
-      <StatusBar
-        sessionId={activeTab.sessionId}
-        health={activeTab.health}
-        user={activeTab.form.user}
-        host={activeTab.form.host}
-        port={activeTab.form.port}
-        database={activeTab.form.database}
-        executedSql={activeTab.executedSql}
-        results={activeTab.results}
         recentKey={recentKeyOf(activeTab.form, activeTab.profileName)}
-      />
-      <CommandPalette
-        open={paletteOpen}
-        onClose={() => setPaletteOpen(false)}
         commands={commands}
-      />
-      <ShortcutsCheatSheet
-        open={shortcutsOpen}
-        onClose={() => setShortcutsOpen(false)}
-      />
-      <SearchPalette
-        open={searchOpen}
-        schema={activeTab.schema}
-        onClose={() => setSearchOpen(false)}
-        onPick={(id) =>
-          patchTab(activeTabId, {
-            sql:
-              activeTab.sql.length > 0 && !activeTab.sql.endsWith(' ')
-                ? `${activeTab.sql} ${id}`
-                : `${activeTab.sql}${id}`,
-          })
-        }
-      />
-      <HistoryPanel
-        open={historyOpen}
-        profileLabel={
-          (activeTab.selectedProfileId
-            ? profiles.find((p) => p.id === activeTab.selectedProfileId)?.name
-            : null) ?? activeTab.profileName ?? 'No profile'
-        }
-        entries={historyEntries}
-        loading={historyLoading}
-        onClose={() => setHistoryOpen(false)}
-        onPick={(sql) => patchTab(activeTabId, { sql })}
-        onClear={clearHistory}
-        onSetLabel={setHistoryLabel}
-        onDeleteEntry={deleteHistoryEntry}
-        onDeleteEntries={deleteHistoryEntries}
+        paletteOpen={paletteOpen}
+        onPaletteClose={() => setPaletteOpen(false)}
+        shortcutsOpen={shortcutsOpen}
+        onShortcutsClose={() => setShortcutsOpen(false)}
+        searchOpen={searchOpen}
+        onSearchClose={() => setSearchOpen(false)}
+        onSearchPick={(id) => patchTab(activeTabId, { sql: appendIdentifier(activeTab.sql, id) })}
       />
       <StatsDashboard
         open={statsOpen}
@@ -1654,6 +1913,7 @@ export function App() {
           setActive(id);
         }}
       />
+      <ConfirmationModal request={confirmHead} onConfirm={onConfirmHead} onCancel={onCancelHead} />
     </div>
   );
 }
@@ -1674,6 +1934,7 @@ interface ConnectViewProps {
   aliasesLoading: boolean;
   onListAliases: () => void;
   onBrowseFbclient: () => Promise<string | null>;
+  onBrowseDatabase: () => Promise<string | null>;
   onBrowseFbclientDir: () => Promise<{
     fbclientPath: string | null;
     hasFbcrypt: boolean;
@@ -1699,6 +1960,7 @@ function ConnectView({
   aliasesLoading,
   onListAliases,
   onBrowseFbclient,
+  onBrowseDatabase,
   onBrowseFbclientDir,
   onDownloadFbclient,
   fbclientReleases,
@@ -1736,6 +1998,7 @@ function ConnectView({
         aliasesLoading={aliasesLoading}
         onListAliases={onListAliases}
         onBrowseFbclient={onBrowseFbclient}
+        onBrowseDatabase={onBrowseDatabase}
         onBrowseFbclientDir={onBrowseFbclientDir}
         onDownloadFbclient={onDownloadFbclient}
         fbclientReleases={fbclientReleases}
@@ -1749,31 +2012,100 @@ interface SessionViewProps {
   onSqlChange: (value: string) => void;
   onBookmarksChange: (next: Record<string, number>) => void;
   onExecute: () => void;
+  onAbandon: () => void;
   onDisconnect: () => void;
+  onSetTxMode: (mode: TxMode, config: TxConfig) => void;
+  onCommitTx: () => void;
+  onRollbackTx: () => void;
   onRefreshSchema: () => void;
   onSchemaAction: (action: SchemaAction) => void;
+  onPluginDdl: (ddl: SchemaDdl) => void;
   onClearError: () => void;
   onOpenStats: () => void;
+  stats: DatabaseStats | null;
+  onRefreshStats: () => void;
+  onComputeRowCounts: () => Promise<
+    { name: string; kind: 'table' | 'view'; count: number | null; error?: string }[]
+  >;
   onCommitCellEdit: (sql: string) => Promise<void>;
   onCommitDdl: (sql: string) => Promise<void>;
   onFetchTableExport: (table: TableInfo) => Promise<TableExportPart>;
   onStreamedExport: StreamedExportRunner;
-  onApplyFilter: (sql: string) => Promise<void>;
+  onApplyFilter: (sql: string, options?: { recordHistory?: boolean }) => Promise<void>;
   onColumnWidthsChange: (next: Record<string, number>) => void;
   onFetchBlob: (blobId: string) => Promise<string>;
   onCountAllRows: (args: { table: string; predicate: string | null }) => Promise<number>;
-  onFetchScopedRows: (args: { table: string; predicate: string | null }) => Promise<
-    { cells: ColumnValue[] }[]
-  >;
+  onFetchScopedRows: (args: {
+    table: string;
+    predicate: string | null;
+  }) => Promise<{ cells: ColumnValue[] }[]>;
   onReconnect: () => void;
   plugins: ActivePlugin[];
-  onPickPluginPanel: (plugin: ActivePlugin, panel: SidebarPanelInfo) => void;
   onShowDdl: (kind: DdlSourceKind, name: string) => void;
   onBrowseTable: (name: string) => Promise<void>;
   onCloseFocusedObject: () => void;
+  onCloseFocusedRoutine: () => void;
   showSettings: boolean;
   onCloseSettings: () => void;
+  showPlugins: boolean;
+  onClosePlugins: () => void;
+  showAbout: boolean;
+  onCloseAbout: () => void;
+  /** Configured history view, or `null` when history is not the active
+   *  pane. A slot rather than ten separate props: the host owns the
+   *  profile and every history call. */
+  historyPage: ReactNode | null;
+  /** Leaves whatever full-pane view is showing. Needed here because the
+   *  object-list page is this component's own state, and it renders
+   *  below `historyPage` in the switch — so opening one while History
+   *  was up produced no visible change at all. */
+  onLeavePage: () => void;
+  showSqlEditor: boolean;
+  onOpenSqlEditor: () => void;
+  onCloseSqlEditor: () => void;
+  appVersion: string;
   onOpenDeepSearch: () => void;
+}
+
+const SESSION_KEY_PREFIX = 'plamenix.session.';
+
+function readStashedSession(tabId: string): string | null {
+  try {
+    return window.sessionStorage.getItem(SESSION_KEY_PREFIX + tabId);
+  } catch {
+    return null;
+  }
+}
+
+function writeStashedSession(tabId: string, sessionId: string): void {
+  try {
+    window.sessionStorage.setItem(SESSION_KEY_PREFIX + tabId, sessionId);
+  } catch {
+    /* sessionStorage unavailable — silent no-op. */
+  }
+}
+
+function clearStashedSession(tabId: string): void {
+  try {
+    window.sessionStorage.removeItem(SESSION_KEY_PREFIX + tabId);
+  } catch {
+    /* no-op. */
+  }
+}
+
+function summariseResults(
+  results: StatementOutcome[] | null,
+): { totalDurationMs: number; totalRows: number; statementCount: number } | null {
+  if (!results || results.length === 0) return null;
+  let totalDurationMs = 0;
+  let totalRows = 0;
+  for (const r of results) {
+    totalDurationMs += r.durationMs;
+    if (r.status === 'ok' && 'Rows' in r.result) {
+      totalRows += r.result.Rows.rows.length;
+    }
+  }
+  return { totalDurationMs, totalRows, statementCount: results.length };
 }
 
 function SessionView({
@@ -1781,11 +2113,19 @@ function SessionView({
   onSqlChange,
   onBookmarksChange,
   onExecute,
+  onAbandon,
   onDisconnect,
+  onSetTxMode,
+  onCommitTx,
+  onRollbackTx,
   onRefreshSchema,
   onSchemaAction,
+  onPluginDdl,
   onClearError,
   onOpenStats,
+  stats,
+  onRefreshStats,
+  onComputeRowCounts,
   onCommitCellEdit,
   onCommitDdl,
   onFetchTableExport,
@@ -1797,12 +2137,22 @@ function SessionView({
   onFetchScopedRows,
   onReconnect,
   plugins,
-  onPickPluginPanel,
   onShowDdl,
   onBrowseTable,
+  historyPage,
+  onLeavePage,
   onCloseFocusedObject,
+  onCloseFocusedRoutine,
   showSettings,
   onCloseSettings,
+  showPlugins,
+  onClosePlugins,
+  showAbout,
+  onCloseAbout,
+  showSqlEditor,
+  onOpenSqlEditor,
+  onCloseSqlEditor,
+  appVersion,
   onOpenDeepSearch,
 }: SessionViewProps) {
   const sidebarCollapsed = useThemeStore((s) => s.sidebarCollapsed);
@@ -1839,23 +2189,32 @@ function SessionView({
               schema={tab.schema}
               busy={tab.busy}
               onRefresh={onRefreshSchema}
-              onSelect={(id) =>
-                onSqlChange(
-                  tab.sql.length > 0 && !tab.sql.endsWith(' ')
-                    ? `${tab.sql} ${id}`
-                    : `${tab.sql}${id}`,
-                )
-              }
+              onCopyIdentifier={(identifier, label) => {
+                void copyText(identifier).then((ok) => {
+                  useToastStore.getState().push({
+                    kind: 'notice',
+                    tone: ok ? 'success' : 'error',
+                    title: ok ? `Copied ${label}` : `Could not copy ${label}`,
+                  });
+                });
+              }}
               onOpenObject={(target) => {
-                if (target.kind === 'table') {
+                // Tables AND views support `SELECT * FROM <name>` —
+                // route both through the rich TableObjectView so views
+                // get their data tab, not just a DDL dump.
+                if (target.kind === 'table' || target.kind === 'view') {
                   void onBrowseTable(target.name);
                 } else {
                   onShowDdl(target.kind, target.name);
                 }
               }}
               onAction={onSchemaAction}
+              onPluginDdl={onPluginDdl}
               onNewTable={() => setSchemaEditorOpen(true)}
-              onPickObjectList={(kind) => setObjectListKind(kind)}
+              onPickObjectList={(kind) => {
+                onLeavePage();
+                setObjectListKind(kind);
+              }}
               onNewObject={(kind) => setNewObjectKind(kind)}
               onExportDatabase={() => setDbExportOpen(true)}
               engineVersion={tab.engineVersion}
@@ -1863,11 +2222,53 @@ function SessionView({
               onOpenDeepSearch={onOpenDeepSearch}
             />
           </div>
-          <PluginsSidebar plugins={plugins} onPickPanel={onPickPluginPanel} />
+          <button
+            type="button"
+            onClick={showSqlEditor ? onCloseSqlEditor : onOpenSqlEditor}
+            aria-pressed={showSqlEditor}
+            className={
+              'flex w-full shrink-0 items-center justify-center gap-2 px-3 py-2 text-[12px] font-semibold text-white shadow-sm transition-colors ' +
+              (showSqlEditor
+                ? 'bg-blue-600 hover:bg-blue-500'
+                : 'bg-emerald-600 hover:bg-emerald-500')
+            }
+            title={showSqlEditor ? 'Close full SQL editor' : 'Open full SQL editor'}
+          >
+            <SqlEditorIcon className="h-3.5 w-3.5" />
+            SQL Editor
+          </button>
         </div>
       )}
-      {showSettings ? (
+      {historyPage ? (
+        historyPage
+      ) : showAbout ? (
+        <AboutPage version={appVersion} onClose={onCloseAbout} backLabel="Back to session" />
+      ) : showPlugins ? (
+        <PluginsPage plugins={plugins} onClose={onClosePlugins} backLabel="Back to session" />
+      ) : showSettings ? (
         <SettingsPage onClose={onCloseSettings} backLabel="Back to session" />
+      ) : showSqlEditor ? (
+        <SqlEditorPage
+          sql={tab.sql}
+          onSqlChange={onSqlChange}
+          schema={tab.schema}
+          busy={tab.busy}
+          onExecute={() => onExecute()}
+          bookmarks={tab.bookmarks}
+          onBookmarksChange={onBookmarksChange}
+          results={tab.results}
+          schemaForResults={tab.schema}
+          tabId={tab.id}
+          sessionId={tab.sessionId}
+          columnWidths={tab.columnWidths}
+          onColumnWidthsChange={onColumnWidthsChange}
+          onCommitCellEdit={onCommitCellEdit}
+          onApplyFilter={onApplyFilter}
+          onFetchBlob={onFetchBlob}
+          onCountAllRows={onCountAllRows}
+          onFetchScopedRows={onFetchScopedRows}
+          onClose={onCloseSqlEditor}
+        />
       ) : objectListKind && tab.schema ? (
         <ObjectListPage
           kind={objectListKind}
@@ -1879,8 +2280,17 @@ function SessionView({
           onShowDdl={onShowDdl}
         />
       ) : (
-        <main className="flex flex-1 flex-col gap-6 overflow-y-auto p-6">
+        <main className="flex flex-1 flex-col gap-6 overflow-y-auto px-6 pb-6 pt-0">
           <QueryPanel
+            transactionBar={
+              <TransactionBar
+                status={tab.txStatus}
+                busy={tab.busy}
+                onSetMode={onSetTxMode}
+                onCommit={onCommitTx}
+                onRollback={onRollbackTx}
+              />
+            }
             sessionId={tab.sessionId}
             sql={tab.sql}
             busy={tab.busy}
@@ -1890,24 +2300,50 @@ function SessionView({
             health={tab.health}
             engineVersion={tab.engineVersion}
             encryptionKeySupplied={tab.form.encryptionKey.length > 0}
+            lastResultSummary={summariseResults(tab.results)}
             onSqlChange={onSqlChange}
             onExecute={onExecute}
+            onAbandon={onAbandon}
             onClose={onDisconnect}
             onBookmarksChange={onBookmarksChange}
             onOpenStats={onOpenStats}
             onReconnect={onReconnect}
+            onEditorFocus={() => emitEditorFocused({ tabId: tab.id, focusedAt: Date.now() })}
+            onEditorSelectionChange={(sel) =>
+              emitEditorSelectionChanged({
+                tabId: tab.id,
+                anchor: sel.anchor,
+                head: sel.head,
+                length: sel.head - sel.anchor,
+                changedAt: Date.now(),
+              })
+            }
           />
 
           {tab.error && <ErrorBanner error={tab.error} onDismiss={onClearError} />}
 
           {(() => {
+            if (tab.focusedRoutine) {
+              return (
+                <RoutineObjectView
+                  kind={tab.focusedRoutine.kind}
+                  name={tab.focusedRoutine.name}
+                  source={tab.focusedRoutine.source}
+                  loading={tab.focusedRoutine.loading}
+                  error={tab.focusedRoutine.error}
+                  onClose={onCloseFocusedRoutine}
+                  onOpenInEditor={(sql) => onSqlChange(sql)}
+                />
+              );
+            }
             const focusedTable =
               tab.focusedObjectName && tab.schema
-                ? tab.schema.tables.find((t) => t.name === tab.focusedObjectName) ?? null
+                ? (tab.schema.tables.find((t) => t.name === tab.focusedObjectName) ?? null)
                 : null;
             if (focusedTable && tab.results && tab.results.length > 0) {
               return (
                 <TableObjectView
+                  tabId={tab.id}
                   table={focusedTable}
                   results={tab.results}
                   schema={tab.schema}
@@ -1927,6 +2363,8 @@ function SessionView({
             if (tab.results && tab.results.length > 0) {
               return (
                 <MultiResultView
+                  tabId={tab.id}
+                  sessionId={tab.sessionId}
                   outcomes={tab.results}
                   schema={tab.schema}
                   onCommitCellEdit={onCommitCellEdit}
@@ -1952,6 +2390,12 @@ function SessionView({
               schema={tab.schema}
               recentKey={recentKeyOf(tab.form, tab.profileName)}
               onPickRecent={(sql) => onSqlChange(sql)}
+              stats={stats}
+              onRefreshStats={onRefreshStats}
+              onComputeRowCounts={onComputeRowCounts}
+              onRefreshSchema={onRefreshSchema}
+              onNewQuery={() => onSqlChange('')}
+              embedded={tab.form.embedded}
             />
           )}
         </main>

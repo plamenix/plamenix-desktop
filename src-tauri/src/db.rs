@@ -13,7 +13,9 @@ pub struct DbState {
 
 impl DbState {
     pub fn new() -> Self {
-        Self { driver: RsfbDriver::new() }
+        Self {
+            driver: RsfbDriver::new(),
+        }
     }
 
     pub const fn driver(&self) -> &RsfbDriver {

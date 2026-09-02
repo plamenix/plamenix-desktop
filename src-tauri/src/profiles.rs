@@ -124,7 +124,10 @@ impl ProfilesState {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| PathBuf::from("."));
         let secrets = SecretBackend::new(&config_dir).unwrap_or_else(|err| {
-            tracing::error!(?err, "failed to open secret backend — falling back to keyring");
+            tracing::error!(
+                ?err,
+                "failed to open secret backend — falling back to keyring"
+            );
             #[cfg(debug_assertions)]
             {
                 // Fallback can't recover the dev-only file path here;

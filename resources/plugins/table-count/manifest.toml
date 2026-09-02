@@ -1,0 +1,46 @@
+#:schema https://plamenix.dev/schemas/plugin-manifest-1.0.0.json
+
+# The bundled plugin that actually uses a capability.
+#
+# `hello` deliberately declares none — it is the minimal-world smoke
+# test, and several host tests depend on it staying that way. This one
+# exists so the capability model is visible in the running app rather
+# than only in the test suite: it declares `db.read.any`, the
+# permissions panel lists that as pending until the user approves it,
+# and every query it makes is refused until they do.
+
+[plugin]
+id = "dev.plamenix.tablecount"
+name = "Table Count"
+version = "1.0.0"
+plamenix_min_version = ">=1.0.0-beta"
+plugin_api = "1.0"
+# Tier 1. `plugin-minimal` imports nothing but `host`, so a plugin that
+# touches the database has to say so — and the host builds its linker
+# from this line, which means a plugin declaring less than it imports
+# does not instantiate at all.
+world = "plamenix:plugin@1.0.0/plugin-db-reader"
+targets = ["desktop", "web"]
+restart_policy = "transient"
+description = "Counts the user tables in the connected database after each query, to demonstrate a plugin holding a real capability."
+author = "Plamenix"
+license = "MIT OR Apache-2.0"
+
+# Both are required rather than optional: without either one the plugin
+# has nothing to do, so asking for them at install is honest. Required
+# does not mean auto-granted — the user still approves them, and until
+# then the host refuses every call.
+[permissions]
+required = [
+  { capability = "db.read.any", purpose = "Count the tables in the database you are connected to." },
+  { capability = "db.session.context.read", purpose = "Know which connection you are looking at." },
+]
+optional = []
+
+[entry_points]
+wasm = "table-count.wasm"
+
+[contributions]
+# Runs after a statement completes, which is when the table count could
+# have changed.
+event_subscriptions = ["query/executed"]

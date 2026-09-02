@@ -9,7 +9,10 @@ pub struct BootStep {
 
 impl BootStep {
     pub fn new(label: impl Into<String>) -> Self {
-        Self { label: label.into(), detail: None }
+        Self {
+            label: label.into(),
+            detail: None,
+        }
     }
 }
 

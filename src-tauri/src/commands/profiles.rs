@@ -11,8 +11,8 @@
 
 use plamenix_db::{ConnectMode, DbDriver, SessionId};
 use plamenix_profiles::{
-    ConnectOverrides, Profile, ProfileId, ProfileStore, RuntimeSecrets,
-    now_epoch_ms, resolve_connection_config, resolve_pure_rust,
+    ConnectOverrides, Profile, ProfileId, ProfileStore, RuntimeSecrets, now_epoch_ms,
+    resolve_connection_config, resolve_pure_rust,
 };
 use plamenix_secrets::{SecretRef, SecretStore};
 use serde::{Deserialize, Serialize};
@@ -55,6 +55,9 @@ pub struct ProfileDraft {
     /// which falls back to `UTF8`.
     #[serde(default)]
     pub charset: Option<String>,
+    /// `true` when the profile attaches via Firebird's embedded engine.
+    #[serde(default)]
+    pub embedded: bool,
 }
 
 #[derive(Debug, Deserialize)]
@@ -110,6 +113,7 @@ pub fn profile_save(
         last_disconnected_at: None,
         fbclient_path: draft.fbclient_path.filter(|s| !s.is_empty()),
         charset: draft.charset.filter(|s| !s.is_empty()),
+        embedded: draft.embedded,
     };
 
     if let Ok(existing) = state.store.get(id) {
@@ -128,10 +132,16 @@ pub fn profile_save(
         let account = format!("profile:{}:password", id.0);
         let secret_ref = SecretRef::new(&state.service, &account);
         if value.is_empty() {
-            state.secrets.delete(&secret_ref).map_err(|err| err.to_string())?;
+            state
+                .secrets
+                .delete(&secret_ref)
+                .map_err(|err| err.to_string())?;
             profile.password_keyring_ref = None;
         } else {
-            state.secrets.store(&secret_ref, &value).map_err(|err| err.to_string())?;
+            state
+                .secrets
+                .store(&secret_ref, &value)
+                .map_err(|err| err.to_string())?;
             profile.password_keyring_ref = Some(account);
         }
     }
@@ -139,10 +149,16 @@ pub fn profile_save(
         let account = format!("profile:{}:encryption-key", id.0);
         let secret_ref = SecretRef::new(&state.service, &account);
         if value.is_empty() {
-            state.secrets.delete(&secret_ref).map_err(|err| err.to_string())?;
+            state
+                .secrets
+                .delete(&secret_ref)
+                .map_err(|err| err.to_string())?;
             profile.encryption_key_keyring_ref = None;
         } else {
-            state.secrets.store(&secret_ref, &value).map_err(|err| err.to_string())?;
+            state
+                .secrets
+                .store(&secret_ref, &value)
+                .map_err(|err| err.to_string())?;
             profile.encryption_key_keyring_ref = Some(account);
         }
     }
@@ -152,16 +168,17 @@ pub fn profile_save(
 
 #[tauri::command]
 #[tracing::instrument(name = "cmd.profile_delete", skip(state), fields(profile = %id.0))]
-pub fn profile_delete(
-    state: State<'_, ProfilesState>,
-    id: ProfileId,
-) -> Result<(), String> {
+pub fn profile_delete(state: State<'_, ProfilesState>, id: ProfileId) -> Result<(), String> {
     if let Ok(existing) = state.store.get(id) {
         if let Some(account) = existing.password_keyring_ref {
-            let _ = state.secrets.delete(&SecretRef::new(&state.service, account));
+            let _ = state
+                .secrets
+                .delete(&SecretRef::new(&state.service, account));
         }
         if let Some(account) = existing.encryption_key_keyring_ref {
-            let _ = state.secrets.delete(&SecretRef::new(&state.service, account));
+            let _ = state
+                .secrets
+                .delete(&SecretRef::new(&state.service, account));
         }
     }
     state.store.delete(id).map_err(|err| err.to_string())
@@ -205,7 +222,11 @@ pub async fn profile_connect(
     .map_err(|err| err.to_string())?;
 
     let pure_rust = resolve_pure_rust(&profile, &overrides);
-    let mode = if pure_rust { ConnectMode::PureRust } else { ConnectMode::Native };
+    let mode = if pure_rust {
+        ConnectMode::PureRust
+    } else {
+        ConnectMode::Native
+    };
     if !pure_rust
         && config.fbclient_path.is_none()
         && let Some(path) = bundled_path(&app)

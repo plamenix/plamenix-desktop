@@ -6,13 +6,23 @@ name = "Hello"
 version = "1.0.0"
 plamenix_min_version = ">=1.0.0-beta"
 plugin_api = "1.0"
+world = "plamenix:plugin@1.0.0/plugin-minimal"
+targets = ["desktop", "web"]
+restart_policy = "transient"
 description = "Smoke-test plugin. Contributes one sidebar panel and emits a single info-level log line on activation."
 author = "Plamenix"
 license = "MIT OR Apache-2.0"
 
+# None, and that is now enforceable rather than aspirational. This
+# manifest used to request `db.schema.list`, `os.notify`, and
+# `clipboard.read` while declaring `plugin-minimal`, whose whole point
+# is that it imports nothing but `host`. The plugin's code touches none
+# of them — it logs a line and reads the host version — so all three
+# were permissions the install dialog asked the user to approve for
+# imports the plugin could not reach.
 [permissions]
-required = ["db.schema.list"]
-optional = ["os.notify", "clipboard.read"]
+required = []
+optional = []
 
 [entry_points]
 wasm = "hello-plugin.wasm"

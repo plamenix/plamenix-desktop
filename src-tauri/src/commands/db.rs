@@ -9,7 +9,8 @@ use std::time::Instant;
 
 use plamenix_db::{
     ColumnValue, ConnectMode, ConnectionConfig, CryptState, DbDriver, QueryResult, Schema,
-    SessionId, StatementOutcome, inject_row_limit, is_select_like, split_statements,
+    SessionId, StatementOutcome, TxConfig, TxMode, TxStatus, accepts_row_limit, inject_row_limit,
+    split_statements,
 };
 use plamenix_types::{
     DatabaseAlias, DatabaseStats, HistoryEntry, ListAliasesResult, TestConnectionResult,
@@ -25,6 +26,7 @@ use tauri::{AppHandle, State};
 use crate::db::DbState;
 use crate::fbclient::bundled_path;
 use crate::history::HistoryStore;
+use crate::plugins::PluginsState;
 
 /// Substitutes the bundled fbclient when the caller did not supply
 /// one and native mode is in effect. Pure-Rust attaches skip this
@@ -75,7 +77,11 @@ pub async fn db_connect(
     state: State<'_, DbState>,
     request: ConnectRequest,
 ) -> Result<ConnectResponse, String> {
-    let mode = if request.pure_rust { ConnectMode::PureRust } else { ConnectMode::Native };
+    let mode = if request.pure_rust {
+        ConnectMode::PureRust
+    } else {
+        ConnectMode::Native
+    };
     let mut config = request.config;
     apply_fbclient_fallback(&mut config, request.pure_rust, &app);
     state
@@ -106,7 +112,7 @@ pub struct ExecuteRequest {
 #[tauri::command]
 #[tracing::instrument(
     name = "cmd.db_execute",
-    skip(db, history, request),
+    skip(db, history, plugins, request),
     fields(
         session = %request.session_id.0,
         sql_len = request.sql.len(),
@@ -116,6 +122,7 @@ pub struct ExecuteRequest {
 pub async fn db_execute(
     db: State<'_, DbState>,
     history: State<'_, HistoryStore>,
+    plugins: State<'_, PluginsState>,
     request: ExecuteRequest,
 ) -> Result<Vec<StatementOutcome>, String> {
     let stmts = split_statements(&request.sql);
@@ -129,14 +136,20 @@ pub async fn db_execute(
     let mut outcomes = Vec::with_capacity(stmts.len());
     for sql in stmts {
         let started = Instant::now();
-        let exec_sql = if is_select_like(&sql) {
+        // `accepts_row_limit`, not "does this return rows": Firebird's
+        // ROWS clause belongs to the SELECT grammar, so appending it to
+        // an EXECUTE BLOCK or EXECUTE PROCEDURE is a syntax error.
+        let exec_sql = if accepts_row_limit(&sql) {
             inject_row_limit(&sql, ROW_LIMIT)
         } else {
             sql.clone()
         };
         match driver.execute(session_id, exec_sql).await {
             Ok(mut result) => {
-                if let QueryResult::Rows { rows, truncated, .. } = &mut result {
+                if let QueryResult::Rows {
+                    rows, truncated, ..
+                } = &mut result
+                {
                     if rows.len() > ROW_LIMIT as usize {
                         rows.truncate(ROW_LIMIT as usize);
                         *truncated = true;
@@ -148,15 +161,10 @@ pub async fn db_execute(
                         QueryResult::Rows { rows, .. } => Some(rows.len() as i64),
                         QueryResult::Affected { rows } => Some(*rows as i64),
                     };
-                    if let Err(e) = history.record(
-                        pid,
-                        &sql,
-                        duration_ms,
-                        "ok",
-                        None,
-                        row_count,
-                        history_limit,
-                    ) {
+                    if let Err(e) = history
+                        .record(pid, &sql, duration_ms, "ok", None, row_count, history_limit)
+                        .await
+                    {
                         tracing::warn!(?e, "history record failed");
                     }
                 }
@@ -170,15 +178,18 @@ pub async fn db_execute(
                 let duration_ms = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 let error_text = err.to_string();
                 if let Some(pid) = profile_id {
-                    if let Err(e) = history.record(
-                        pid,
-                        &sql,
-                        duration_ms,
-                        "err",
-                        Some(&error_text),
-                        None,
-                        history_limit,
-                    ) {
+                    if let Err(e) = history
+                        .record(
+                            pid,
+                            &sql,
+                            duration_ms,
+                            "err",
+                            Some(&error_text),
+                            None,
+                            history_limit,
+                        )
+                        .await
+                    {
                         tracing::warn!(?e, "history record failed");
                     }
                 }
@@ -191,6 +202,19 @@ pub async fn db_execute(
             }
         }
     }
+    // Point every plugin at the session this batch ran against, before
+    // any event about it reaches them. A plugin that reacts by querying
+    // the database asks about "the session the host called me for", and
+    // without this that is always `None` and every `db` import refuses.
+    //
+    // The slot persists, which is what lets the renderer's
+    // `query/executed` — forwarded a moment later — find the right
+    // session. This command no longer dispatches that event itself: the
+    // renderer emits it with the sql, row count and duration, and
+    // dispatching a statement count under the same topic from here gave
+    // every subscriber the same fact twice in two different shapes.
+    plugins.set_session(Some(&session_id.0.to_string()));
+
     Ok(outcomes)
 }
 
@@ -207,19 +231,19 @@ fn default_history_limit() -> i64 {
 }
 
 #[tauri::command]
-pub fn history_list(
+pub async fn history_list(
     history: State<'_, HistoryStore>,
     request: HistoryListRequest,
 ) -> Result<Vec<HistoryEntry>, String> {
-    history.list(&request.profile_id, request.limit)
+    history.list(&request.profile_id, request.limit).await
 }
 
 #[tauri::command]
-pub fn history_clear(
+pub async fn history_clear(
     history: State<'_, HistoryStore>,
     profile_id: String,
 ) -> Result<u64, String> {
-    history.clear(&profile_id)
+    history.clear(&profile_id).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -233,19 +257,18 @@ pub struct HistorySetLabelRequest {
 }
 
 #[tauri::command]
-pub fn history_set_label(
+pub async fn history_set_label(
     history: State<'_, HistoryStore>,
     request: HistorySetLabelRequest,
 ) -> Result<bool, String> {
-    history.set_label(request.id, request.label.as_deref())
+    history
+        .set_label(request.id, request.label.as_deref())
+        .await
 }
 
 #[tauri::command]
-pub fn history_delete(
-    history: State<'_, HistoryStore>,
-    id: i64,
-) -> Result<bool, String> {
-    history.delete(id)
+pub async fn history_delete(history: State<'_, HistoryStore>, id: i64) -> Result<bool, String> {
+    history.delete(id).await
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,29 +278,110 @@ pub struct HistoryDeleteManyRequest {
 }
 
 #[tauri::command]
-pub fn history_delete_many(
+pub async fn history_delete_many(
     history: State<'_, HistoryStore>,
     request: HistoryDeleteManyRequest,
 ) -> Result<u64, String> {
-    history.delete_many(&request.ids)
+    history.delete_many(&request.ids).await
 }
 
 #[tauri::command]
 #[tracing::instrument(name = "cmd.db_ping", skip(state), fields(session = %session_id.0))]
-pub async fn db_ping(
-    state: State<'_, DbState>,
-    session_id: SessionId,
-) -> Result<String, String> {
-    state.driver().ping(session_id).await.map_err(|err| err.to_string())
+pub async fn db_ping(state: State<'_, DbState>, session_id: SessionId) -> Result<String, String> {
+    state
+        .driver()
+        .ping(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
 #[tracing::instrument(name = "cmd.db_close", skip(state), fields(session = %session_id.0))]
-pub async fn db_close(
+pub async fn db_close(state: State<'_, DbState>, session_id: SessionId) -> Result<(), String> {
+    state
+        .driver()
+        .close(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Switches a session between autocommit and manual commit.
+///
+/// Refused while a transaction is open — the caller must commit or roll
+/// back first, so no work is silently discarded or silently committed
+/// by a mode change.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_set_transaction_mode", skip(state), fields(session = %session_id.0, ?mode))]
+pub async fn db_set_transaction_mode(
     state: State<'_, DbState>,
     session_id: SessionId,
-) -> Result<(), String> {
-    state.driver().close(session_id).await.map_err(|err| err.to_string())
+    mode: TxMode,
+    config: TxConfig,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .set_transaction_mode(session_id, mode, config)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Opens an explicit transaction. Manual mode opens one on the first
+/// statement, so this is only for starting one deliberately.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_begin_transaction", skip(state), fields(session = %session_id.0))]
+pub async fn db_begin_transaction(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .begin_transaction(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Commits the open transaction.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_commit", skip(state), fields(session = %session_id.0))]
+pub async fn db_commit(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .commit(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Rolls back the open transaction, discarding every statement since it
+/// opened — DDL included.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_rollback", skip(state), fields(session = %session_id.0))]
+pub async fn db_rollback(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .rollback(session_id)
+        .await
+        .map_err(|err| err.to_string())
+}
+
+/// Current transaction state. Answered from driver state without
+/// touching the engine, so the UI can poll it for the age readout.
+#[tauri::command]
+#[tracing::instrument(name = "cmd.db_transaction_status", skip(state), fields(session = %session_id.0))]
+pub async fn db_transaction_status(
+    state: State<'_, DbState>,
+    session_id: SessionId,
+) -> Result<TxStatus, String> {
+    state
+        .driver()
+        .transaction_status(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[tauri::command]
@@ -286,7 +390,11 @@ pub async fn db_crypt_state(
     state: State<'_, DbState>,
     session_id: SessionId,
 ) -> Result<CryptState, String> {
-    state.driver().crypt_state(session_id).await.map_err(|err| err.to_string())
+    state
+        .driver()
+        .crypt_state(session_id)
+        .await
+        .map_err(|err| err.to_string())
 }
 
 #[derive(Debug, Deserialize)]
@@ -320,7 +428,8 @@ pub async fn db_test_connection(
     apply_fbclient_fallback(&mut config, request.pure_rust, &app);
     match driver.connect(config, mode).await {
         Ok(session_id) => {
-            let version_sql = "SELECT rdb$get_context('SYSTEM', 'ENGINE_VERSION') FROM rdb$database";
+            let version_sql =
+                "SELECT rdb$get_context('SYSTEM', 'ENGINE_VERSION') FROM rdb$database";
             let firebird_version = match driver.execute(session_id, version_sql.to_string()).await {
                 Ok(QueryResult::Rows { rows, .. }) => rows
                     .first()
@@ -386,9 +495,22 @@ fn candidate_databases_conf_paths() -> Vec<PathBuf> {
 /// is skipped — only the inline form is harvested.
 fn parse_databases_conf(text: &str) -> Vec<DatabaseAlias> {
     let mut out = Vec::new();
+    // Depth of the `alias = { ... }` block form. Skipping only the
+    // opening line was not enough: the body's own `Database = /path`
+    // entries then parsed as top-level aliases, so a single block
+    // produced a bogus alias named `Database`.
+    let mut block_depth = 0usize;
     for raw in text.lines() {
         let line = raw.trim();
         if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if block_depth > 0 {
+            if line.contains('}') {
+                block_depth -= 1;
+            } else if line.ends_with('{') {
+                block_depth += 1;
+            }
             continue;
         }
         let Some(eq) = line.find('=') else { continue };
@@ -398,7 +520,10 @@ fn parse_databases_conf(text: &str) -> Vec<DatabaseAlias> {
             continue;
         }
         if path_part.starts_with('{') {
-            // Block form — skip; we'd need multi-line state to walk it.
+            // Block form. Per-database settings live inside; the alias
+            // itself is not usable as a path, so the whole block is
+            // skipped rather than half-read.
+            block_depth += 1;
             continue;
         }
         if alias.chars().any(char::is_whitespace) {
@@ -423,6 +548,17 @@ mod tests {
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].alias, "employee");
         assert_eq!(out[0].path, "/var/firebird/employee.fdb");
+    }
+
+    #[test]
+    fn block_body_does_not_leak_as_an_alias() {
+        // The body's `Database = /path` line looks exactly like a
+        // top-level entry, so skipping only the opening `alias = {`
+        // produced a bogus alias named `Database`.
+        let conf = "foo = {\n  Database = /tmp/foo.fdb\n  DefaultDbCachePages = 100\n}\nbar = /tmp/bar.fdb\n";
+        let out = parse_databases_conf(conf);
+        assert_eq!(out.len(), 1, "unexpected aliases: {out:?}");
+        assert_eq!(out[0].alias, "bar");
     }
 
     #[test]
