@@ -1,5 +1,8 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState, type ReactNode } from 'react';
 import {
+  useToastStore,
+  copyText,
+  historyKeyOf,
   ConfirmationModal,
   ConnectionScreen,
   ErrorBanner,
@@ -88,6 +91,7 @@ import {
   buildBuiltinActivePlugins,
   decodeHex,
   HomeButton,
+  HistoryButton,
   PluginsPage,
   type CryptState,
   type Profile,
@@ -327,6 +331,23 @@ export function App() {
   const [showPlugins, setShowPlugins] = useState(false);
   const [showAbout, setShowAbout] = useState(false);
   const [showSqlEditor, setShowSqlEditor] = useState(false);
+
+  /**
+   * Leaves whatever full-pane view is showing.
+   *
+   * Picking something in the schema sidebar is navigation, and
+   * navigation beats the page the user happens to be parked on. Without
+   * this the pane switch simply masked it: clicking a table while
+   * History was open set the tab's focused object and results and then
+   * rendered History over the top of them, so the sidebar looked dead.
+   */
+  const leaveCurrentPage = useCallback(() => {
+    setHistoryOpen(false);
+    setShowSettings(false);
+    setShowAbout(false);
+    setShowPlugins(false);
+    setShowSqlEditor(false);
+  }, []);
   const APP_VERSION = '1.0.0-beta.0';
 
   useEffect(() => {
@@ -504,6 +525,7 @@ export function App() {
 
   const handleShowDdl = useCallback(
     async (kind: DdlSourceKind, name: string) => {
+      leaveCurrentPage();
       const tab = activeTab;
       const tabId = tab.id;
       // Surface the routine in the content pane (clearing any focused
@@ -605,13 +627,20 @@ export function App() {
         });
       }
     },
-    [activeTab, patchTab],
+    [activeTab, patchTab, leaveCurrentPage],
   );
 
   const openHistory = useCallback(async () => {
-    const pid = activeTab.selectedProfileId;
-    if (!pid) return;
+    // History is a destination, so it displaces the others rather than
+    // stacking on top of them.
+    leaveCurrentPage();
     setHistoryOpen(true);
+
+    // Opening always works, even with nowhere to read from. Returning
+    // early here is what made the button do nothing at all for a
+    // session connected without a saved profile: the click was
+    // swallowed and the interface said nothing about why.
+    const pid = historyKeyOf(activeTab.selectedProfileId, activeTab.form);
     setHistoryLoading(true);
     try {
       const res = await tauriTransport.invoke<HistoryEntry[]>('history_list', {
@@ -624,11 +653,10 @@ export function App() {
     } finally {
       setHistoryLoading(false);
     }
-  }, [activeTab, activeTabId, patchTab]);
+  }, [activeTab, activeTabId, patchTab, leaveCurrentPage]);
 
   const clearHistory = useCallback(async () => {
-    const pid = activeTab.selectedProfileId;
-    if (!pid) return;
+    const pid = historyKeyOf(activeTab.selectedProfileId, activeTab.form);
     try {
       await tauriTransport.invoke<number>('history_clear', { profileId: pid });
       setHistoryEntries([]);
@@ -970,7 +998,7 @@ export function App() {
         request: {
           sessionId: tab.sessionId,
           sql,
-          profileId: tab.selectedProfileId,
+          profileId: historyKeyOf(tab.selectedProfileId, tab.form),
           historyLimit: currentHistoryLimit(),
         },
       });
@@ -1016,7 +1044,7 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         });
@@ -1054,7 +1082,7 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         });
@@ -1214,6 +1242,7 @@ export function App() {
 
   const handleBrowseTable = useCallback(
     async (name: string) => {
+      leaveCurrentPage();
       const tabId = activeTabId;
       const tab = activeTab;
       if (!tab.sessionId) return;
@@ -1227,7 +1256,7 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         });
@@ -1245,11 +1274,11 @@ export function App() {
         patchTab(tabId, { busy: false });
       }
     },
-    [activeTab, activeTabId, patchTab],
+    [activeTab, activeTabId, patchTab, leaveCurrentPage],
   );
 
   const handleApplyFilter = useCallback(
-    async (sql: string) => {
+    async (sql: string, options?: { recordHistory?: boolean }) => {
       const tabId = activeTabId;
       const tab = activeTab;
       if (!tab.sessionId) return;
@@ -1261,7 +1290,13 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            // Omitted for the automatic re-read after a write: history
+            // is what the user ran, and the host skips recording
+            // entirely when there is no key.
+            profileId:
+              options?.recordHistory === false
+                ? undefined
+                : historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         });
@@ -1293,7 +1328,7 @@ export function App() {
           request: {
             sessionId: tab.sessionId,
             sql,
-            profileId: tab.selectedProfileId,
+            profileId: historyKeyOf(tab.selectedProfileId, tab.form),
             historyLimit: currentHistoryLimit(),
           },
         }),
@@ -1308,6 +1343,7 @@ export function App() {
   };
 
   const handleSchemaAction = async (action: SchemaAction) => {
+    leaveCurrentPage();
     await applySchemaAction(action, {
       tabId: activeTabId,
       sessionId: activeTab.sessionId,
@@ -1629,15 +1665,13 @@ export function App() {
                 !showAbout &&
                 !showPlugins &&
                 !showSqlEditor &&
+                !historyOpen &&
                 activeTab.focusedObjectName === null &&
                 activeTab.focusedRoutine === null &&
                 activeTab.results === null
               }
               onClick={() => {
-                setShowSettings(false);
-                setShowAbout(false);
-                setShowPlugins(false);
-                setShowSqlEditor(false);
+                leaveCurrentPage();
                 patchTab(activeTabId, {
                   focusedObjectName: null,
                   focusedRoutine: null,
@@ -1647,6 +1681,9 @@ export function App() {
               }}
             />
           )}
+          {activeTab.sessionId !== null && (
+            <HistoryButton active={historyOpen} onClick={() => void openHistory()} />
+          )}
           <AppMenu
             items={[
               {
@@ -1655,8 +1692,7 @@ export function App() {
                 label: 'Plugins',
                 badge: String(plugins.length),
                 onClick: () => {
-                  setShowSettings(false);
-                  setShowAbout(false);
+                  leaveCurrentPage();
                   setShowPlugins(true);
                 },
               },
@@ -1665,8 +1701,7 @@ export function App() {
                 icon: SettingsIcon,
                 label: 'Settings',
                 onClick: () => {
-                  setShowPlugins(false);
-                  setShowAbout(false);
+                  leaveCurrentPage();
                   setShowSettings(true);
                 },
               },
@@ -1675,8 +1710,7 @@ export function App() {
                 icon: InfoIcon,
                 label: 'About',
                 onClick: () => {
-                  setShowPlugins(false);
-                  setShowSettings(false);
+                  leaveCurrentPage();
                   setShowAbout(true);
                 },
               },
@@ -1755,6 +1789,33 @@ export function App() {
           onClosePlugins={() => setShowPlugins(false)}
           showAbout={showAbout}
           onCloseAbout={() => setShowAbout(false)}
+          onLeavePage={leaveCurrentPage}
+          historyPage={
+            historyOpen ? (
+              <HistoryPanel
+                open
+                variant="page"
+                profileLabel={
+                  (activeTab.selectedProfileId
+                    ? profiles.find((p) => p.id === activeTab.selectedProfileId)?.name
+                    : null) ??
+                  activeTab.profileName ??
+                  'No profile'
+                }
+                entries={historyEntries}
+                loading={historyLoading}
+                onClose={() => setHistoryOpen(false)}
+                onPick={(sql) => {
+                  patchTab(activeTabId, { sql });
+                  setHistoryOpen(false);
+                }}
+                onClear={clearHistory}
+                onSetLabel={setHistoryLabel}
+                onDeleteEntry={deleteHistoryEntry}
+                onDeleteEntries={deleteHistoryEntries}
+              />
+            ) : null
+          }
           showSqlEditor={showSqlEditor}
           onOpenSqlEditor={() => {
             patchTab(activeTabId, {
@@ -1824,24 +1885,6 @@ export function App() {
         searchOpen={searchOpen}
         onSearchClose={() => setSearchOpen(false)}
         onSearchPick={(id) => patchTab(activeTabId, { sql: appendIdentifier(activeTab.sql, id) })}
-      />
-      <HistoryPanel
-        open={historyOpen}
-        profileLabel={
-          (activeTab.selectedProfileId
-            ? profiles.find((p) => p.id === activeTab.selectedProfileId)?.name
-            : null) ??
-          activeTab.profileName ??
-          'No profile'
-        }
-        entries={historyEntries}
-        loading={historyLoading}
-        onClose={() => setHistoryOpen(false)}
-        onPick={(sql) => patchTab(activeTabId, { sql })}
-        onClear={clearHistory}
-        onSetLabel={setHistoryLabel}
-        onDeleteEntry={deleteHistoryEntry}
-        onDeleteEntries={deleteHistoryEntries}
       />
       <StatsDashboard
         open={statsOpen}
@@ -1988,7 +2031,7 @@ interface SessionViewProps {
   onCommitDdl: (sql: string) => Promise<void>;
   onFetchTableExport: (table: TableInfo) => Promise<TableExportPart>;
   onStreamedExport: StreamedExportRunner;
-  onApplyFilter: (sql: string) => Promise<void>;
+  onApplyFilter: (sql: string, options?: { recordHistory?: boolean }) => Promise<void>;
   onColumnWidthsChange: (next: Record<string, number>) => void;
   onFetchBlob: (blobId: string) => Promise<string>;
   onCountAllRows: (args: { table: string; predicate: string | null }) => Promise<number>;
@@ -2008,6 +2051,15 @@ interface SessionViewProps {
   onClosePlugins: () => void;
   showAbout: boolean;
   onCloseAbout: () => void;
+  /** Configured history view, or `null` when history is not the active
+   *  pane. A slot rather than ten separate props: the host owns the
+   *  profile and every history call. */
+  historyPage: ReactNode | null;
+  /** Leaves whatever full-pane view is showing. Needed here because the
+   *  object-list page is this component's own state, and it renders
+   *  below `historyPage` in the switch — so opening one while History
+   *  was up produced no visible change at all. */
+  onLeavePage: () => void;
   showSqlEditor: boolean;
   onOpenSqlEditor: () => void;
   onCloseSqlEditor: () => void;
@@ -2087,6 +2139,8 @@ function SessionView({
   plugins,
   onShowDdl,
   onBrowseTable,
+  historyPage,
+  onLeavePage,
   onCloseFocusedObject,
   onCloseFocusedRoutine,
   showSettings,
@@ -2135,13 +2189,15 @@ function SessionView({
               schema={tab.schema}
               busy={tab.busy}
               onRefresh={onRefreshSchema}
-              onSelect={(id) =>
-                onSqlChange(
-                  tab.sql.length > 0 && !tab.sql.endsWith(' ')
-                    ? `${tab.sql} ${id}`
-                    : `${tab.sql}${id}`,
-                )
-              }
+              onCopyIdentifier={(identifier, label) => {
+                void copyText(identifier).then((ok) => {
+                  useToastStore.getState().push({
+                    kind: 'notice',
+                    tone: ok ? 'success' : 'error',
+                    title: ok ? `Copied ${label}` : `Could not copy ${label}`,
+                  });
+                });
+              }}
               onOpenObject={(target) => {
                 // Tables AND views support `SELECT * FROM <name>` —
                 // route both through the rich TableObjectView so views
@@ -2155,7 +2211,10 @@ function SessionView({
               onAction={onSchemaAction}
               onPluginDdl={onPluginDdl}
               onNewTable={() => setSchemaEditorOpen(true)}
-              onPickObjectList={(kind) => setObjectListKind(kind)}
+              onPickObjectList={(kind) => {
+                onLeavePage();
+                setObjectListKind(kind);
+              }}
               onNewObject={(kind) => setNewObjectKind(kind)}
               onExportDatabase={() => setDbExportOpen(true)}
               engineVersion={tab.engineVersion}
@@ -2180,7 +2239,9 @@ function SessionView({
           </button>
         </div>
       )}
-      {showAbout ? (
+      {historyPage ? (
+        historyPage
+      ) : showAbout ? (
         <AboutPage version={appVersion} onClose={onCloseAbout} backLabel="Back to session" />
       ) : showPlugins ? (
         <PluginsPage plugins={plugins} onClose={onClosePlugins} backLabel="Back to session" />
