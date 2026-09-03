@@ -89,14 +89,7 @@ jobs:
           - label: Linux (x86_64)
             os: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu
-            # .deb and .rpm only. The AppImage step fails on the runner
-            # with a bare "failed to run linuxdeploy" and no cause;
-            # neither installing libfuse2 nor APPIMAGE_EXTRACT_AND_RUN
-            # changed it. Both packages build reliably and cover
-            # Debian/Ubuntu and Fedora/RHEL, so AppImage is a gap to
-            # close later rather than a reason to ship no Linux build
-            # at all.
-            tauri-args: --bundles deb,rpm
+            tauri-args: ''
           - label: Windows (x86_64)
             os: windows-latest
             rust-target: x86_64-pc-windows-msvc
@@ -223,6 +216,17 @@ jobs:
           # cause. Extraction removes the dependency instead of betting
           # on it. Ignored on non-Linux jobs.
           APPIMAGE_EXTRACT_AND_RUN: 1
+          # `linuxdeploy-plugin-appimage` shells out to `appimagetool`,
+          # which refuses to run without `ARCH` and whose complaint
+          # Tauri swallows — the bundle step reports only "failed to run
+          # linuxdeploy" with no cause, sixteen seconds after starting.
+          # Harmless on the other jobs, and the fbclient script assigns
+          # its own ARCH so this cannot reach it.
+          ARCH: x86_64
+          # linuxdeploy's strip step is built against an older binutils
+          # than the runner ships and fails on binaries it produced
+          # itself. Nothing here depends on a stripped AppImage.
+          NO_STRIP: true
           # Signing variables are deliberately absent.
           #
           # An unset secret expands to the empty string rather than to
