@@ -1,0 +1,221 @@
+# Builds installable Plamenix desktop binaries and attaches them to a
+# GitHub Release.
+#
+# ## Why this file is more than `tauri build`
+#
+# Plamenix is a polyrepo. `plamenix-desktop` reaches its siblings by
+# relative path — `link:../plamenix-ui` in package.json, and eight Cargo
+# `path` dependencies into `../../plamenix-core` including the vendored
+# `rsfbclient-native`. A runner that checks out this repo alone cannot
+# resolve any of them, so the first job of this workflow is to rebuild
+# the directory layout a developer has locally:
+#
+#     <workspace>/
+#       plamenix-core/
+#       plamenix-ui/
+#       plamenix-desktop/     <- this repo
+#
+# While the sibling repositories are private, that cross-repo checkout
+# needs a token with read access to them; `GITHUB_TOKEN` is scoped to
+# this repository only and will 404 on the others. Create a fine-grained
+# PAT with `contents: read` on plamenix-core and plamenix-ui and store
+# it as the `SIBLING_REPOS_TOKEN` secret. Once the repositories are
+# public the secret can be deleted and the checkouts keep working.
+#
+# ## Signing
+#
+# Both signing blocks are keyed off secrets and are skipped when those
+# secrets are absent, so this workflow produces working unsigned builds
+# on day one. Unsigned is not cosmetic: macOS reports "cannot be opened
+# because the developer cannot be verified" and Windows shows a
+# SmartScreen warning. Add the secrets when there is a certificate to
+# add; nothing else here changes.
+
+name: Release
+
+on:
+  push:
+    tags:
+      # Matches `1.0.0-beta` as well as `1.0.0`. Deliberately narrow, so
+      # a docs or scratch tag cannot start a two-hour matrix build.
+      - '[0-9]+.[0-9]+.[0-9]+'
+      - '[0-9]+.[0-9]+.[0-9]+-*'
+  # Lets a release be rebuilt without moving the tag.
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to build (e.g. 1.0.0-beta)'
+        required: true
+        type: string
+
+# One release build at a time. Two runs racing to attach assets to the
+# same release is how half-populated releases happen.
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      # Every platform that can finish should finish. A Windows failure
+      # is no reason to withhold a working macOS build.
+      fail-fast: false
+      matrix:
+        include:
+          - label: macOS (Apple Silicon)
+            os: macos-14
+            rust-target: aarch64-apple-darwin
+            tauri-args: --target aarch64-apple-darwin
+          - label: macOS (Intel)
+            os: macos-14
+            rust-target: x86_64-apple-darwin
+            tauri-args: --target x86_64-apple-darwin
+          # 22.04, not latest: Tauri 2 links against webkit2gtk-4.1, and
+          # the produced binary's glibc requirement is that of the build
+          # host. Building on the oldest supported runner is what makes
+          # the AppImage usable on anything older than the runner.
+          - label: Linux (x86_64)
+            os: ubuntu-22.04
+            rust-target: x86_64-unknown-linux-gnu
+            tauri-args: ''
+          - label: Windows (x86_64)
+            os: windows-latest
+            rust-target: x86_64-pc-windows-msvc
+            tauri-args: ''
+
+    steps:
+      - name: Check out plamenix-desktop
+        uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag || github.ref }}
+          path: plamenix-desktop
+
+      # The sibling checkouts. Same ref as this repo: the repositories
+      # are tagged together, so `1.0.0-beta` means the same commit set
+      # across all three. A missing tag here fails loudly, which is
+      # correct — building a release against sibling `main` would
+      # produce a binary that matches no tag.
+      - name: Check out plamenix-core
+        uses: actions/checkout@v4
+        with:
+          repository: plamenix/plamenix-core
+          ref: ${{ inputs.tag || github.ref_name }}
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+          path: plamenix-core
+
+      - name: Check out plamenix-ui
+        uses: actions/checkout@v4
+        with:
+          repository: plamenix/plamenix-ui
+          ref: ${{ inputs.tag || github.ref_name }}
+          token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
+          path: plamenix-ui
+
+      - name: Install Linux build dependencies
+        if: startsWith(matrix.os, 'ubuntu')
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            libwebkit2gtk-4.1-dev \
+            libappindicator3-dev \
+            librsvg2-dev \
+            patchelf \
+            libssl-dev \
+            build-essential \
+            file \
+            wget
+
+      - name: Set up Rust ${{ matrix.rust-target }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          # Matches plamenix-core/rust-toolchain.toml. Pinned rather than
+          # `stable`, so a new release of Rust cannot break a release
+          # build on a day nobody touched the code.
+          toolchain: '1.95'
+          targets: ${{ matrix.rust-target }}
+
+      - name: Cache cargo
+        uses: swatinem/rust-cache@v2
+        with:
+          workspaces: plamenix-desktop/src-tauri -> target
+          key: ${{ matrix.rust-target }}
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: '10.0.0'
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+          cache: pnpm
+          cache-dependency-path: plamenix-desktop/pnpm-lock.yaml
+
+      # `link:../plamenix-ui` resolves to this repo's source tree, and
+      # the desktop build imports its built `dist`. Nothing else builds
+      # it for us, so it happens here, before the Tauri build runs.
+      - name: Build @plamenix/ui
+        working-directory: plamenix-ui
+        run: |
+          pnpm install --frozen-lockfile
+          pnpm build
+
+      - name: Install desktop dependencies
+        working-directory: plamenix-desktop
+        run: pnpm install --frozen-lockfile
+
+      - name: Build and publish
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          # Absent secrets mean an unsigned build rather than a failed
+          # one. tauri-action skips each signing step whose inputs are
+          # empty.
+          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
+          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
+          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+        with:
+          projectPath: plamenix-desktop
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'Plamenix ${{ inputs.tag || github.ref_name }}'
+          releaseBody: |
+            Open-source IDE for Firebird 2.5–5.0.
+
+            **This is a beta.** The core loop — connect, browse schema,
+            run SQL, edit rows — works and is covered by tests. The
+            surfaces around it are newer. Issues are welcome and useful.
+
+            ### Installing
+
+            | Platform | File |
+            |---|---|
+            | macOS (Apple Silicon) | `*_aarch64.dmg` |
+            | macOS (Intel) | `*_x64.dmg` |
+            | Linux | `*.AppImage` or `*.deb` |
+            | Windows | `*-setup.exe` or `*.msi` |
+
+            These builds are **not code-signed**. macOS will say the
+            developer cannot be verified — right-click the app and
+            choose Open to get past it. Windows will show a SmartScreen
+            warning; choose More info, then Run anyway.
+
+            Firebird's client library is loaded at runtime, so no
+            separate `fbclient` install is needed for the default
+            pure-Rust connection mode.
+          # Kept as a draft so the release can be checked before it is
+          # visible, and so a platform that fails does not publish a
+          # release missing its binaries.
+          releaseDraft: true
+          prerelease: true
+          args: ${{ matrix.tauri-args }}
