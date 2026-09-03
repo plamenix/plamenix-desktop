@@ -3,11 +3,13 @@
 Tauri 2 shell for the Plamenix Firebird IDE — desktop edition.
 
 This repo is one of five in the Plamenix polyrepo. For project-wide
-context, see the [meta-workspace](https://github.com/zlatan/plamenix).
+context, see the [meta-workspace](https://github.com/plamenix/plamenix).
 
 ## Status
 
-`1.0.0-beta` is in development. Mid-June 2026 ETA.
+`1.0.0-beta` was released on 3 September 2026 — see the
+[release](https://github.com/plamenix/plamenix-desktop/releases/tag/1.0.0-beta)
+for installers.
 
 ## Stack
 
