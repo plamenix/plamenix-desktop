@@ -277,7 +277,9 @@ jobs:
             does not have yet.
 
             [Building from source](https://github.com/plamenix/plamenix/blob/main/docs/build-prerequisites.md)
-            takes about twenty minutes, most of it unattended.
+            is mostly unattended — the first build compiles the full
+            Rust dependency tree, and every build after that is
+            incremental.
 
             If you would rather use the installers: on macOS,
             right-click the app and choose Open. On Windows, choose
