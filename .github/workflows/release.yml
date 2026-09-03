@@ -124,12 +124,19 @@ jobs:
           token: ${{ secrets.SIBLING_REPOS_TOKEN || github.token }}
           path: plamenix-ui
 
+      # `libfuse2` is not optional despite looking it: `linuxdeploy`,
+      # which Tauri downloads to build the AppImage, is itself an
+      # AppImage and needs FUSE to mount itself. Without it the bundle
+      # step reports only "failed to run linuxdeploy" — .deb and .rpm
+      # build fine, which makes it look like an AppImage-specific bug
+      # rather than a missing library.
       - name: Install Linux build dependencies
         if: startsWith(matrix.os, 'ubuntu')
         run: |
           sudo apt-get update
           sudo apt-get install -y \
             libwebkit2gtk-4.1-dev \
+            libfuse2 \
             libappindicator3-dev \
             librsvg2-dev \
             patchelf \
