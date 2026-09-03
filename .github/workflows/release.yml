@@ -71,8 +71,12 @@ jobs:
             os: macos-14
             rust-target: aarch64-apple-darwin
             tauri-args: --target aarch64-apple-darwin
+          # macos-13 is the Intel runner. `fetch-fbclient.sh` selects
+          # its download by `uname -m`, so cross-building x86_64 on an
+          # arm64 host would bundle an arm64 fbclient into an Intel app
+          # — a build that succeeds and then cannot attach to anything.
           - label: macOS (Intel)
-            os: macos-14
+            os: macos-13
             rust-target: x86_64-apple-darwin
             tauri-args: --target x86_64-apple-darwin
           # 22.04, not latest: Tauri 2 links against webkit2gtk-4.1, and
@@ -165,6 +169,20 @@ jobs:
         run: |
           pnpm install --frozen-lockfile
           pnpm build
+
+      # `resources/fbclient/` is gitignored, so it does not exist on a
+      # fresh checkout and `tauri build` fails on the missing bundle
+      # resource. The script's own header says the release pipeline is
+      # expected to run it once per platform; nothing was.
+      - name: Ensure unzip is available
+        if: startsWith(matrix.os, 'windows')
+        shell: bash
+        run: command -v unzip >/dev/null || choco install unzip -y --no-progress
+
+      - name: Fetch the bundled Firebird client
+        working-directory: plamenix-desktop
+        shell: bash
+        run: ./scripts/fetch-fbclient.sh
 
       - name: Install desktop dependencies
         working-directory: plamenix-desktop
