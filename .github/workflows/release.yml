@@ -263,10 +263,25 @@ jobs:
             | Linux | `*.AppImage` or `*.deb` |
             | Windows | `*-setup.exe` or `*.msi` |
 
+            ### On macOS and Windows, consider building from source
+
             These builds are **not code-signed**. macOS will say the
-            developer cannot be verified — right-click the app and
-            choose Open to get past it. Windows will show a SmartScreen
-            warning; choose More info, then Run anyway.
+            developer cannot be verified and Windows will show a
+            SmartScreen warning — and those warnings are correct.
+            Nothing has vouched for these binaries.
+
+            They are produced by GitHub Actions from the tagged commit,
+            not uploaded from anyone's laptop, and the workflow is in
+            the repository. That is verifiable, but it is not the same
+            as a signature. Signing certificates cost money the project
+            does not have yet.
+
+            [Building from source](https://github.com/plamenix/plamenix/blob/main/docs/build-prerequisites.md)
+            takes about twenty minutes, most of it unattended.
+
+            If you would rather use the installers: on macOS,
+            right-click the app and choose Open. On Windows, choose
+            More info, then Run anyway. Linux packages are unaffected.
 
             Firebird's client library is loaded at runtime, so no
             separate `fbclient` install is needed for the default
