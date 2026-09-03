@@ -305,4 +305,31 @@ jobs:
           releaseName: 'Plamenix ${{ inputs.tag || github.ref_name }}'
           releaseDraft: true
           prerelease: true
-          args: --bundles appimage
+          args: --bundles appimage --verbose
+
+      # Runs linuxdeploy by hand when the bundle step failed, purely to
+      # see what it says. Tauri reports "failed to run linuxdeploy" and
+      # discards the tool's own stderr, which is the reason four
+      # different fixes were tried blind.
+      - name: Diagnose the AppImage failure
+        if: startsWith(matrix.os, 'ubuntu') && failure() == false
+        continue-on-error: true
+        working-directory: plamenix-desktop/src-tauri/target/release/bundle/appimage
+        shell: bash
+        env:
+          ARCH: x86_64
+          NO_STRIP: 'true'
+          APPIMAGE_EXTRACT_AND_RUN: 1
+        run: |
+          echo "--- contents ---"; ls -la . || true
+          [ -x ./linuxdeploy-x86_64.AppImage ] || { echo "linuxdeploy not present"; exit 0; }
+          echo "--- linuxdeploy --version ---"
+          ./linuxdeploy-x86_64.AppImage --version 2>&1 | head -20 || true
+          echo "--- rerun against the AppDir ---"
+          APPDIR="$(find . -maxdepth 1 -type d -name '*.AppDir' | head -n1)"
+          echo "appdir: ${APPDIR:-none}"
+          [ -n "$APPDIR" ] || exit 0
+          ./linuxdeploy-x86_64.AppImage \
+            --appdir "$APPDIR" \
+            --plugin gtk \
+            --output appimage 2>&1 | tail -60 || true
