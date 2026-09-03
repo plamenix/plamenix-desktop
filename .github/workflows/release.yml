@@ -89,7 +89,11 @@ jobs:
           - label: Linux (x86_64)
             os: ubuntu-22.04
             rust-target: x86_64-unknown-linux-gnu
-            tauri-args: ''
+            # .deb and .rpm only here. The AppImage is attempted
+            # separately below, because it is the one format that has
+            # failed repeatedly and it must not be able to take the
+            # other two down with it.
+            tauri-args: --bundles deb,rpm
           - label: Windows (x86_64)
             os: windows-latest
             rust-target: x86_64-pc-windows-msvc
@@ -273,3 +277,32 @@ jobs:
           releaseDraft: true
           prerelease: true
           args: ${{ matrix.tauri-args }}
+
+      # Best-effort, and deliberately last.
+      #
+      # `tauri build` bundles formats in one pass and aborts the whole
+      # command on the first failure, so an AppImage that will not build
+      # discards the .deb and .rpm that already did — which is exactly
+      # what happened: both bundled successfully, then the job failed
+      # and uploaded nothing.
+      #
+      # linuxdeploy fails here with a bare "failed to run linuxdeploy"
+      # and Tauri swallows its stderr, so there is nothing to diagnose
+      # from. Until that is understood, the AppImage is allowed to fail
+      # without costing the release its Linux packages.
+      - name: Build the AppImage (best-effort)
+        if: startsWith(matrix.os, 'ubuntu')
+        continue-on-error: true
+        uses: tauri-apps/tauri-action@v0
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          APPIMAGE_EXTRACT_AND_RUN: 1
+          ARCH: x86_64
+          NO_STRIP: true
+        with:
+          projectPath: plamenix-desktop
+          tagName: ${{ inputs.tag || github.ref_name }}
+          releaseName: 'Plamenix ${{ inputs.tag || github.ref_name }}'
+          releaseDraft: true
+          prerelease: true
+          args: --bundles appimage
