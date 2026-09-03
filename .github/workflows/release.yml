@@ -203,6 +203,14 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
+          # Runs `linuxdeploy` and its plugins by extracting them rather
+          # than mounting them. They are AppImages, and mounting needs
+          # FUSE, which a runner may or may not provide in a usable
+          # state — installing `libfuse2` alone did not fix it, and the
+          # failure surfaces only as "failed to run linuxdeploy" with no
+          # cause. Extraction removes the dependency instead of betting
+          # on it. Ignored on non-Linux jobs.
+          APPIMAGE_EXTRACT_AND_RUN: 1
           # Signing variables are deliberately absent.
           #
           # An unset secret expands to the empty string rather than to
