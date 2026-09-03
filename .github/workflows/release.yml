@@ -71,13 +71,16 @@ jobs:
             os: macos-14
             rust-target: aarch64-apple-darwin
             tauri-args: --target aarch64-apple-darwin
-          # macos-13 is the Intel runner. `fetch-fbclient.sh` selects
-          # its download by `uname -m`, so cross-building x86_64 on an
-          # arm64 host would bundle an arm64 fbclient into an Intel app
-          # — a build that succeeds and then cannot attach to anything.
+          # Cross-compiled from the Apple Silicon runner. GitHub has
+          # retired the macos-13 Intel image, so a job asking for it
+          # queues until it times out rather than failing — which is
+          # exactly what happened, silently, on every run. `FB_ARCH`
+          # tells the fbclient script which architecture is being built
+          # for, since it otherwise reads the host's.
           - label: macOS (Intel)
-            os: macos-13
+            os: macos-14
             rust-target: x86_64-apple-darwin
+            fb-arch: x86_64
             tauri-args: --target x86_64-apple-darwin
           # 22.04, not latest: Tauri 2 links against webkit2gtk-4.1, and
           # the produced binary's glibc requirement is that of the build
@@ -200,6 +203,8 @@ jobs:
       - name: Fetch the bundled Firebird client
         working-directory: plamenix-desktop
         shell: bash
+        env:
+          FB_ARCH: ${{ matrix.fb-arch }}
         run: ./scripts/fetch-fbclient.sh
 
       - name: Install desktop dependencies

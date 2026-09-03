@@ -31,7 +31,12 @@ esac
 BUILD="${FB_BUILD:-$DEFAULT_BUILD}"
 
 OS="$(uname -s)"
-ARCH="$(uname -m)"
+# Overridable because the architecture that matters is the one being
+# built *for*, not the one building. Cross-compiling the Intel macOS
+# app on an Apple Silicon runner would otherwise bundle an arm64
+# fbclient into an x86_64 app — a build that succeeds and then cannot
+# attach to any database.
+ARCH="${FB_ARCH:-$(uname -m)}"
 
 case "$OS-$ARCH" in
     Darwin-arm64) ASSET="Firebird-${BUILD}-macos-arm64.pkg"; EXT="pkg" ;;
