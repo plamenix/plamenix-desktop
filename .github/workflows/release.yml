@@ -299,6 +299,19 @@ jobs:
           APPIMAGE_EXTRACT_AND_RUN: 1
           ARCH: x86_64
           NO_STRIP: true
+          # The reason the AppImage failed for five runs.
+          #
+          # `libfbclient.so.2` has a DT_NEEDED on `libtomcrypt.so.1`,
+          # and Firebird ships both in its own `lib/` — which the bundle
+          # already carries. linuxdeploy walks every shared object in
+          # the AppDir and resolves its dependencies through the system
+          # linker, which does not search a private directory, so it
+          # reported "Could not find dependency: libtomcrypt.so.1" for a
+          # file sitting a few directories away.
+          #
+          # .deb and .rpm do no such walk, which is why only the
+          # AppImage ever failed.
+          LD_LIBRARY_PATH: ${{ github.workspace }}/plamenix-desktop/resources/fbclient/v50/lib
         with:
           projectPath: plamenix-desktop
           tagName: ${{ inputs.tag || github.ref_name }}
@@ -307,29 +320,3 @@ jobs:
           prerelease: true
           args: --bundles appimage --verbose
 
-      # Runs linuxdeploy by hand when the bundle step failed, purely to
-      # see what it says. Tauri reports "failed to run linuxdeploy" and
-      # discards the tool's own stderr, which is the reason four
-      # different fixes were tried blind.
-      - name: Diagnose the AppImage failure
-        if: startsWith(matrix.os, 'ubuntu') && failure() == false
-        continue-on-error: true
-        working-directory: plamenix-desktop/src-tauri/target/release/bundle/appimage
-        shell: bash
-        env:
-          ARCH: x86_64
-          NO_STRIP: 'true'
-          APPIMAGE_EXTRACT_AND_RUN: 1
-        run: |
-          echo "--- contents ---"; ls -la . || true
-          [ -x ./linuxdeploy-x86_64.AppImage ] || { echo "linuxdeploy not present"; exit 0; }
-          echo "--- linuxdeploy --version ---"
-          ./linuxdeploy-x86_64.AppImage --version 2>&1 | head -20 || true
-          echo "--- rerun against the AppDir ---"
-          APPDIR="$(find . -maxdepth 1 -type d -name '*.AppDir' | head -n1)"
-          echo "appdir: ${APPDIR:-none}"
-          [ -n "$APPDIR" ] || exit 0
-          ./linuxdeploy-x86_64.AppImage \
-            --appdir "$APPDIR" \
-            --plugin gtk \
-            --output appimage 2>&1 | tail -60 || true
