@@ -90,7 +90,11 @@ jobs:
           - label: Windows (x86_64)
             os: windows-latest
             rust-target: x86_64-pc-windows-msvc
-            tauri-args: ''
+            # NSIS only. The MSI format requires any pre-release
+            # identifier to be numeric and <= 65535, so `1.0.0-beta`
+            # cannot build one at all -- "beta" is not a number. The
+            # `-setup.exe` installer carries the same payload.
+            tauri-args: --bundles nsis
 
     steps:
       - name: Check out plamenix-desktop
@@ -192,17 +196,18 @@ jobs:
         uses: tauri-apps/tauri-action@v0
         env:
           GITHUB_TOKEN: ${{ github.token }}
-          # Absent secrets mean an unsigned build rather than a failed
-          # one. tauri-action skips each signing step whose inputs are
-          # empty.
-          APPLE_CERTIFICATE: ${{ secrets.APPLE_CERTIFICATE }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_SIGNING_IDENTITY: ${{ secrets.APPLE_SIGNING_IDENTITY }}
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          TAURI_SIGNING_PRIVATE_KEY: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY }}
-          TAURI_SIGNING_PRIVATE_KEY_PASSWORD: ${{ secrets.TAURI_SIGNING_PRIVATE_KEY_PASSWORD }}
+          # Signing variables are deliberately absent.
+          #
+          # An unset secret expands to the empty string rather than to
+          # nothing, so passing `APPLE_CERTIFICATE: ${{ secrets.X }}`
+          # with no certificate configured sets the variable to "" —
+          # which tauri-action reads as "sign this build" and then fails
+          # on `security import` with nothing to import. Omitting them
+          # is what actually produces an unsigned build.
+          #
+          # To sign: add the certificate secrets and reinstate the
+          # APPLE_* / TAURI_SIGNING_* variables here in one commit. Do
+          # not add them speculatively — an empty one is worse than none.
         with:
           projectPath: plamenix-desktop
           tagName: ${{ inputs.tag || github.ref_name }}

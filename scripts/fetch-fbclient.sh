@@ -60,8 +60,13 @@ case "$EXT" in
         # Firebird tarballs contain a `buildroot.tar.gz` that holds the
         # actual file tree rooted at /opt/firebird. Untar it into the
         # staging tree first, then copy what we need.
-        if [ -f "${STAGING}/buildroot.tar.gz" ]; then
-            tar -xzf "${STAGING}/buildroot.tar.gz" -C "$STAGING"
+        # The release tarball unpacks to a versioned directory —
+        # `Firebird-5.0.3.1683-0-linux-x64/` — so `buildroot.tar.gz` is
+        # one level down, not at the staging root. Searching for it
+        # keeps this working if the layout shifts again.
+        BUILDROOT="$(find "$STAGING" -maxdepth 3 -type f -name buildroot.tar.gz | head -n1)"
+        if [ -n "$BUILDROOT" ]; then
+            tar -xzf "$BUILDROOT" -C "$STAGING"
         fi
         FB_ROOT="$(find "$STAGING" -type d -name firebird | head -n1)"
         if [ -z "$FB_ROOT" ]; then
